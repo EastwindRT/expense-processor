@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Review - Expense Processor</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #fafafa;
+            color: #111;
+            min-height: 100vh;
+            padding: 60px 20px;
+        }
+        .container { max-width: 800px; margin: 0 auto; }
+        h1 { font-size: 1.5rem; font-weight: 500; margin-bottom: 8px; }
+        .subtitle { color: #666; font-size: 0.95rem; margin-bottom: 40px; }
+        .flash {
+            padding: 12px 16px;
+            margin-bottom: 24px;
+            border-radius: 6px;
+            font-size: 0.9rem;
+        }
+        .flash.success { background: #e8f5e9; color: #2e7d32; }
+        .flash.error { background: #ffebee; color: #c62828; }
+        .stats {
+            display: flex;
+            gap: 16px;
+            margin-bottom: 32px;
+        }
+        .stat {
+            padding: 16px 24px;
+            background: #fff;
+            border: 1px solid #eee;
+            border-radius: 6px;
+        }
+        .stat-num { font-size: 1.5rem; font-weight: 600; }
+        .stat-label { font-size: 0.8rem; color: #666; margin-top: 4px; }
+        .expense-card {
+            background: #fff;
+            border: 1px solid #eee;
+            border-radius: 8px;
+            padding: 24px;
+            margin-bottom: 16px;
+        }
+        .expense-card.error {
+            border-color: #ffcdd2;
+            background: #fff5f5;
+        }
+        .expense-card.low-confidence {
+            border-left: 3px solid #ff9800;
+        }
+        .expense-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #eee;
+        }
+        .filename {
+            font-size: 0.85rem;
+            color: #666;
+            word-break: break-all;
+        }
+        .confidence {
+            font-size: 0.7rem;
+            padding: 4px 8px;
+            border-radius: 4px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .confidence.high { background: #e8f5e9; color: #2e7d32; }
+        .confidence.medium { background: #fff3e0; color: #e65100; }
+        .confidence.low { background: #ffebee; color: #c62828; }
+        .expense-fields {
+            display: grid;
+            grid-template-columns: 1fr 2fr 1fr;
+            gap: 16px;
+        }
+        .field label {
+            display: block;
+            font-size: 0.75rem;
+            color: #666;
+            margin-bottom: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .field input {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 0.95rem;
+            transition: border-color 0.2s;
+        }
+        .field input:focus {
+            outline: none;
+            border-color: #111;
+        }
+        .field input.needs-review {
+            border-color: #ff9800;
+            background: #fffde7;
+        }
+        .verify-note {
+            margin-top: 12px;
+            padding: 10px 12px;
+            background: #fff8e1;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            color: #f57c00;
+        }
+        .error-msg {
+            color: #c62828;
+            font-size: 0.9rem;
+        }
+        .actions {
+            display: flex;
+            gap: 12px;
+            margin-top: 32px;
+        }
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 6px;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .btn-primary {
+            background: #111;
+            color: #fff;
+        }
+        .btn-primary:hover { background: #333; }
+        .btn-secondary {
+            background: #fff;
+            color: #111;
+            border: 1px solid #ddd;
+        }
+        .btn-secondary:hover { border-color: #111; }
+        .note {
+            margin-top: 24px;
+            padding: 16px;
+            background: #f5f5f5;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Review Extractions</h1>
+        <p class="subtitle">Verify amounts are final totals (after tax & tip)</p>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="flash {{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <div class="stats">
+            <div class="stat">
+                <div class="stat-num">{{ successful|length }}</div>
+                <div class="stat-label">Extracted</div>
+            </div>
+            <div class="stat">
+                <div class="stat-num">{{ failed|length }}</div>
+                <div class="stat-label">Failed</div>
+            </div>
+        </div>
+
+        <form action="{{ url_for('process') }}" method="post" id="processForm">
+            {% for item in successful %}
+            {% set confidence = item.verification.confidence if item.verification else 'medium' %}
+            <div class="expense-card {% if confidence == 'low' %}low-confidence{% endif %}">
+                <div class="expense-header">
+                    <span class="filename">{{ item.original_filename }}</span>
+                    <span class="confidence {{ confidence }}">{{ confidence }} confidence</span>
+                </div>
+                <div class="expense-fields">
+                    <div class="field">
+                        <label>Date</label>
+                        <input type="date" name="date_{{ loop.index0 }}" value="{{ item.date }}"
+                               class="{% if item.date_estimated %}needs-review{% endif %}" required>
+                    </div>
+                    <div class="field">
+                        <label>Description</label>
+                        <input type="text" name="desc_{{ loop.index0 }}"
+                               value="{{ item.description|replace(' (date estimated)', '') }}"
+                               maxlength="60" required>
+                    </div>
+                    <div class="field">
+                        <label>Total (after tax/tip)</label>
+                        <input type="text" name="total_{{ loop.index0 }}"
+                               value="{{ item.total or '' }}"
+                               placeholder="$0.00"
+                               class="{% if confidence == 'low' %}needs-review{% endif %}">
+                    </div>
+                </div>
+                {% if item.verification and item.verification.notes %}
+                <div class="verify-note">
+                    {% for note in item.verification.notes %}
+                    {{ note }}{% if not loop.last %}<br>{% endif %}
+                    {% endfor %}
+                </div>
+                {% endif %}
+                <input type="hidden" name="file_{{ loop.index0 }}" value="{{ item.file_path }}">
+                <input type="hidden" name="orig_{{ loop.index0 }}" value="{{ item.original_filename }}">
+            </div>
+            {% endfor %}
+
+            <input type="hidden" name="count" value="{{ successful|length }}">
+
+            {% for item in failed %}
+            <div class="expense-card error">
+                <div class="expense-header">
+                    <span class="filename">{{ item.original_filename }}</span>
+                </div>
+                <p class="error-msg">{{ item.error }}</p>
+            </div>
+            {% endfor %}
+
+            <div class="note">
+                Please verify all totals are the final amount charged (after tax and tip).
+                Files will be renamed to: YYYY-MM-DD_description.ext
+            </div>
+
+            <div class="actions">
+                <a href="{{ url_for('index') }}" class="btn btn-secondary">Back</a>
+                {% if successful %}
+                <button type="submit" class="btn btn-primary">Process {{ successful|length }} File(s)</button>
+                {% endif %}
+            </div>
+        </form>
+    </div>
+</body>
+</html>

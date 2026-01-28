@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Complete - Expense Processor</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #fafafa;
+            color: #111;
+            min-height: 100vh;
+            padding: 60px 20px;
+        }
+        .container { max-width: 800px; margin: 0 auto; }
+        .success-icon {
+            width: 48px;
+            height: 48px;
+            background: #111;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 16px;
+        }
+        .success-icon svg { width: 24px; height: 24px; color: #fff; }
+        h1 { font-size: 1.5rem; font-weight: 500; margin-bottom: 8px; }
+        .subtitle { color: #666; font-size: 0.95rem; margin-bottom: 40px; }
+        .flash {
+            padding: 12px 16px;
+            margin-bottom: 24px;
+            border-radius: 6px;
+            font-size: 0.9rem;
+        }
+        .flash.success { background: #e8f5e9; color: #2e7d32; }
+        .download-section {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 16px;
+            margin-bottom: 40px;
+        }
+        .download-card {
+            padding: 24px 16px;
+            background: #fff;
+            border: 1px solid #eee;
+            border-radius: 8px;
+            text-align: center;
+        }
+        .download-card h3 {
+            font-size: 0.95rem;
+            font-weight: 500;
+            margin-bottom: 6px;
+        }
+        .download-card p {
+            font-size: 0.8rem;
+            color: #666;
+            margin-bottom: 16px;
+        }
+        table {
+            width: 100%;
+            background: #fff;
+            border: 1px solid #eee;
+            border-radius: 8px;
+            border-collapse: collapse;
+            overflow: hidden;
+        }
+        th, td {
+            padding: 12px 16px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+            font-size: 0.9rem;
+        }
+        th {
+            background: #fafafa;
+            font-weight: 500;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #666;
+        }
+        tr:last-child td { border-bottom: none; }
+        .total { font-weight: 500; }
+        .section-title {
+            font-size: 0.9rem;
+            font-weight: 500;
+            margin: 32px 0 16px;
+            color: #666;
+        }
+        .btn {
+            display: inline-block;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            cursor: pointer;
+            text-decoration: none;
+            transition: all 0.2s;
+        }
+        .btn-primary {
+            background: #111;
+            color: #fff;
+        }
+        .btn-primary:hover { background: #333; }
+        .btn-secondary {
+            background: #fff;
+            color: #111;
+            border: 1px solid #ddd;
+        }
+        .btn-secondary:hover { border-color: #111; }
+        .actions {
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+            margin-top: 40px;
+        }
+        @media (max-width: 600px) {
+            .download-section {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="success-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+            </svg>
+        </div>
+        <h1>Processing Complete</h1>
+        <p class="subtitle">{{ successful|length }} file(s) processed successfully</p>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="flash {{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <div class="download-section">
+            <div class="download-card">
+                <h3>Merged PDF</h3>
+                <p>All receipts in one file</p>
+                <a href="{{ url_for('download_merged_pdf') }}" class="btn btn-primary">Download PDF</a>
+            </div>
+            <div class="download-card">
+                <h3>CSV Data</h3>
+                <p>Expense spreadsheet</p>
+                <a href="{{ url_for('download_csv') }}" class="btn btn-secondary">Download CSV</a>
+            </div>
+            <div class="download-card">
+                <h3>All Files</h3>
+                <p>Everything as ZIP</p>
+                <a href="{{ url_for('download_all') }}" class="btn btn-secondary">Download ZIP</a>
+            </div>
+        </div>
+
+        <div class="section-title">Processed Files</div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Date</th>
+                    <th>Description</th>
+                    <th>Total</th>
+                    <th>Filename</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in successful %}
+                <tr>
+                    <td>{{ item.date }}</td>
+                    <td>{{ item.description }}</td>
+                    <td class="total">{{ item.total or '-' }}</td>
+                    <td>{{ item.new_filename }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+
+        <div class="actions">
+            <a href="{{ url_for('reset') }}" class="btn btn-primary">Process More</a>
+        </div>
+    </div>
+</body>
+</html>

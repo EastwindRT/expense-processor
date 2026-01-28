@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Expense Processor</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #fafafa;
+            color: #111;
+            min-height: 100vh;
+            padding: 60px 20px;
+        }
+        .container { max-width: 600px; margin: 0 auto; }
+        h1 { font-size: 1.5rem; font-weight: 500; margin-bottom: 8px; }
+        .subtitle { color: #666; font-size: 0.95rem; margin-bottom: 40px; }
+        .flash {
+            padding: 12px 16px;
+            margin-bottom: 24px;
+            border-radius: 6px;
+            font-size: 0.9rem;
+        }
+        .flash.success { background: #e8f5e9; color: #2e7d32; }
+        .flash.error { background: #ffebee; color: #c62828; }
+        .flash.info { background: #e3f2fd; color: #1565c0; }
+        .upload-area {
+            border: 2px dashed #ddd;
+            border-radius: 8px;
+            padding: 60px 40px;
+            text-align: center;
+            cursor: pointer;
+            transition: border-color 0.2s;
+            background: #fff;
+        }
+        .upload-area:hover, .upload-area.dragover { border-color: #111; }
+        .upload-area p { color: #666; margin-bottom: 16px; }
+        .upload-area input { display: none; }
+        .btn {
+            display: inline-block;
+            padding: 10px 24px;
+            background: #111;
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .btn:hover { background: #333; }
+        .btn:disabled { background: #ccc; cursor: not-allowed; }
+        .file-list { margin-top: 24px; }
+        .file-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 16px;
+            background: #fff;
+            border: 1px solid #eee;
+            border-radius: 6px;
+            margin-bottom: 8px;
+            font-size: 0.9rem;
+        }
+        .file-item .remove {
+            color: #999;
+            cursor: pointer;
+            padding: 4px 8px;
+        }
+        .file-item .remove:hover { color: #c62828; }
+        .submit-btn { width: 100%; margin-top: 24px; padding: 14px; }
+        .footer { margin-top: 40px; text-align: center; color: #999; font-size: 0.8rem; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Expense Processor</h1>
+        <p class="subtitle">Upload receipts to extract and organize expense data</p>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="flash {{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <form action="{{ url_for('upload_files') }}" method="post" enctype="multipart/form-data" id="uploadForm">
+            <div class="upload-area" id="uploadArea">
+                <p>Drop files here or click to browse</p>
+                <input type="file" name="files" id="fileInput" multiple accept=".pdf,.jpg,.jpeg,.png,.jfif">
+                <button type="button" class="btn" onclick="document.getElementById('fileInput').click()">
+                    Select Files
+                </button>
+            </div>
+            <div class="file-list" id="fileList"></div>
+            <button type="submit" class="btn submit-btn" id="submitBtn" disabled>Upload & Extract</button>
+        </form>
+        <div class="footer">Supports PDF, JPG, PNG, JFIF</div>
+    </div>
+
+    <script>
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+        const fileList = document.getElementById('fileList');
+        const submitBtn = document.getElementById('submitBtn');
+        let selectedFiles = [];
+
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(e => {
+            uploadArea.addEventListener(e, ev => { ev.preventDefault(); ev.stopPropagation(); });
+        });
+        ['dragenter', 'dragover'].forEach(e => uploadArea.addEventListener(e, () => uploadArea.classList.add('dragover')));
+        ['dragleave', 'drop'].forEach(e => uploadArea.addEventListener(e, () => uploadArea.classList.remove('dragover')));
+
+        uploadArea.addEventListener('drop', e => handleFiles(e.dataTransfer.files));
+        fileInput.addEventListener('change', e => handleFiles(e.target.files));
+
+        function handleFiles(files) {
+            selectedFiles = [...selectedFiles, ...Array.from(files)];
+            updateUI();
+        }
+
+        function updateUI() {
+            fileList.innerHTML = selectedFiles.map((f, i) => `
+                <div class="file-item">
+                    <span>${f.name}</span>
+                    <span class="remove" onclick="removeFile(${i})">Remove</span>
+                </div>
+            `).join('');
+            submitBtn.disabled = selectedFiles.length === 0;
+            const dt = new DataTransfer();
+            selectedFiles.forEach(f => dt.items.add(f));
+            fileInput.files = dt.files;
+        }
+
+        function removeFile(i) {
+            selectedFiles.splice(i, 1);
+            updateUI();
+        }
+    </script>
+</body>
+</html>
