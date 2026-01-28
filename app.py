@@ -44,13 +44,17 @@ except ImportError:
 try:
     import pytesseract
     from PIL import Image, ImageEnhance, ImageFilter
-    HAS_OCR = True
     # Configure Tesseract path (Windows or Linux)
     if os.name == 'nt':  # Windows
         tesseract_path = Path(r'C:\Program Files\Tesseract-OCR\tesseract.exe')
         if tesseract_path.exists():
             pytesseract.pytesseract.tesseract_cmd = str(tesseract_path)
-    # On Linux (Render), tesseract is in PATH after apt install
+    # Verify tesseract works
+    try:
+        pytesseract.get_tesseract_version()
+        HAS_OCR = True
+    except Exception:
+        HAS_OCR = False
 except ImportError:
     HAS_OCR = False
 
@@ -138,17 +142,24 @@ def extract_text_from_pdf(file_path: Path) -> str:
 def extract_text_from_image(file_path: Path) -> str:
     """Extract text from image using OCR."""
     if not HAS_OCR:
+        print(f"OCR not available for {file_path}")
         return ""
 
     try:
         img = Image.open(file_path)
+        # Convert to RGB if necessary (handles RGBA, P mode etc)
+        if img.mode not in ('L', 'RGB'):
+            img = img.convert('RGB')
         if img.mode != 'L':
             img = img.convert('L')
         enhancer = ImageEnhance.Contrast(img)
         img = enhancer.enhance(2.0)
         img = img.filter(ImageFilter.SHARPEN)
-        return pytesseract.image_to_string(img)
-    except Exception:
+        text = pytesseract.image_to_string(img)
+        print(f"OCR extracted {len(text)} chars from {file_path.name}")
+        return text
+    except Exception as e:
+        print(f"OCR error for {file_path}: {e}")
         return ""
 
 
