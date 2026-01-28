@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: expense-processor
+    name: receipt-ocr-app
     runtime: docker
     envVars:
       - key: SECRET_KEY
