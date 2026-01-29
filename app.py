@@ -42,21 +42,19 @@ except ImportError:
     HAS_PDFPLUMBER = False
 
 try:
-    import pytesseract
+    import easyocr
     from PIL import Image, ImageEnhance, ImageFilter
-    # Configure Tesseract path (Windows or Linux)
-    if os.name == 'nt':  # Windows
-        tesseract_path = Path(r'C:\Program Files\Tesseract-OCR\tesseract.exe')
-        if tesseract_path.exists():
-            pytesseract.pytesseract.tesseract_cmd = str(tesseract_path)
-    # Verify tesseract works
-    try:
-        pytesseract.get_tesseract_version()
-        HAS_OCR = True
-    except Exception:
-        HAS_OCR = False
+    HAS_OCR = True
+    # Initialize EasyOCR reader once (downloads model on first run)
+    OCR_READER = easyocr.Reader(['en'], gpu=False, verbose=False)
 except ImportError:
     HAS_OCR = False
+    OCR_READER = None
+
+try:
+    from PIL import Image, ImageEnhance, ImageFilter
+except ImportError:
+    pass
 
 # Flask app configuration
 app = Flask(__name__)
@@ -125,38 +123,37 @@ def extract_text_from_pdf(file_path: Path) -> str:
             pass
 
     # OCR fallback for scanned PDFs
-    if HAS_OCR and HAS_FITZ:
+    if HAS_OCR and OCR_READER and HAS_FITZ:
         try:
+            import numpy as np
             doc = fitz.open(file_path)
             for page in doc:
                 pix = page.get_pixmap(dpi=300)
                 img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                text += pytesseract.image_to_string(img) + "\n"
+                img_array = np.array(img)
+                results = OCR_READER.readtext(img_array, detail=1, paragraph=True)
+                results.sort(key=lambda r: r[0][0][1])
+                text += "\n".join([r[1] for r in results]) + "\n"
             doc.close()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"PDF OCR fallback error: {e}")
 
     return text
 
 
 def extract_text_from_image(file_path: Path) -> str:
-    """Extract text from image using OCR."""
-    if not HAS_OCR:
+    """Extract text from image using EasyOCR."""
+    if not HAS_OCR or not OCR_READER:
         print(f"OCR not available for {file_path}")
         return ""
 
     try:
-        img = Image.open(file_path)
-        # Convert to RGB if necessary (handles RGBA, P mode etc)
-        if img.mode not in ('L', 'RGB'):
-            img = img.convert('RGB')
-        if img.mode != 'L':
-            img = img.convert('L')
-        enhancer = ImageEnhance.Contrast(img)
-        img = enhancer.enhance(2.0)
-        img = img.filter(ImageFilter.SHARPEN)
-        text = pytesseract.image_to_string(img)
-        print(f"OCR extracted {len(text)} chars from {file_path.name}")
+        results = OCR_READER.readtext(str(file_path), detail=1, paragraph=True)
+        # Sort results top-to-bottom by y coordinate
+        results.sort(key=lambda r: r[0][0][1])
+        lines = [r[1] for r in results]
+        text = "\n".join(lines)
+        print(f"EasyOCR extracted {len(text)} chars from {file_path.name}")
         return text
     except Exception as e:
         print(f"OCR error for {file_path}: {e}")
