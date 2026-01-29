@@ -66,24 +66,57 @@ SUPPORTED_EXTENSIONS = {'.pdf', '.jpg', '.jpeg', '.png', '.jfif'}
 ILLEGAL_FILENAME_CHARS = r'[/\\:*?"<>|]'
 MAX_DESCRIPTION_LENGTH = 60
 
-# Known Canadian merchants
-KNOWN_MERCHANTS = [
-    'tim hortons', 'tims', 'costco', 'walmart', 'amazon', 'amazon.ca',
-    'canadian tire', 'lcbo', 'shoppers drug mart', 'loblaws', 'no frills',
-    'metro', 'sobeys', 'safeway', 'save-on-foods', 'superstore',
-    'real canadian superstore', 'home depot', 'ikea', 'best buy',
-    'staples', 'dollarama', 'giant tiger', 'winners', 'homesense',
-    'marshalls', 'the bay', 'hudson\'s bay', 'sephora', 'indigo',
-    'chapters', 'petro-canada', 'shell', 'esso', 'husky', 'ultramar',
-    'circle k', 'mcdonald\'s', 'mcdonalds', 'subway', 'starbucks',
-    'a&w', 'harvey\'s', 'wendy\'s', 'burger king', 'kfc', 'popeyes',
-    'pizza pizza', 'domino\'s', 'papa john\'s', 'boston pizza',
-    'the keg', 'swiss chalet', 'east side mario\'s', 'kelsey\'s',
-    'montana\'s', 'jack astor\'s', 'milestones', 'earls', 'cactus club',
-    'rogers', 'bell', 'telus', 'fido', 'koodo', 'virgin mobile',
-    'freedom mobile', 'netflix', 'spotify', 'apple', 'google',
-    'uber', 'uber eats', 'skip the dishes', 'doordash', 'instacart'
-]
+# Expense categories - map keywords to simple generic names
+EXPENSE_CATEGORIES = {
+    'food': [
+        'tim hortons', 'tims', 'mcdonald', 'mcdonalds', 'subway', 'starbucks',
+        'a&w', 'harvey', 'wendy', 'burger king', 'kfc', 'popeyes',
+        'pizza pizza', 'domino', 'papa john', 'boston pizza',
+        'the keg', 'swiss chalet', 'east side mario', 'kelsey',
+        'montana', 'jack astor', 'milestones', 'earls', 'cactus club',
+        'restaurant', 'cafe', 'diner', 'bistro', 'grill', 'kitchen',
+        'sushi', 'pizza', 'burger', 'taco', 'noodle', 'bakery',
+        'food court', 'breakfast', 'lunch', 'dinner',
+    ],
+    'grocery': [
+        'costco', 'walmart', 'loblaws', 'no frills', 'metro', 'sobeys',
+        'safeway', 'save-on-foods', 'superstore', 'real canadian superstore',
+        'freshco', 'food basics', 'farm boy', 'whole foods', 'instacart',
+    ],
+    'hotel': [
+        'hotel', 'motel', 'inn', 'suites', 'marriott', 'hilton', 'hyatt',
+        'sheraton', 'westin', 'fairmont', 'holiday inn', 'best western',
+        'airbnb', 'vrbo', 'booking.com', 'expedia',
+    ],
+    'uber': [
+        'uber', 'lyft',
+    ],
+    'taxi': [
+        'taxi', 'cab', 'beck taxi',
+    ],
+    'gas': [
+        'petro-canada', 'shell', 'esso', 'husky', 'ultramar', 'circle k',
+        'pioneer', 'fuel', 'gas station', 'petroleum',
+    ],
+    'parking': [
+        'parking', 'impark', 'indigo parking', 'green p',
+    ],
+    'office': [
+        'staples', 'best buy', 'amazon', 'amazon.ca', 'apple store',
+    ],
+    'phone': [
+        'rogers', 'bell', 'telus', 'fido', 'koodo', 'virgin mobile',
+        'freedom mobile',
+    ],
+    'delivery': [
+        'uber eats', 'skip the dishes', 'doordash', 'instacart',
+    ],
+    'shopping': [
+        'canadian tire', 'home depot', 'ikea', 'dollarama', 'giant tiger',
+        'winners', 'homesense', 'marshalls', 'the bay', 'hudson\'s bay',
+        'sephora', 'indigo', 'chapters', 'lcbo', 'shoppers drug mart',
+    ],
+}
 
 
 def allowed_file(filename: str) -> bool:
@@ -380,23 +413,17 @@ def extract_total(text: str) -> Optional[str]:
     return f"${clean}.00"
 
 
-def extract_merchant(text: str) -> Optional[str]:
-    """Extract merchant/store name from receipt text."""
+def extract_category(text: str) -> str:
+    """Categorize receipt into a simple generic name (food, hotel, uber, etc.)."""
     text_lower = text.lower()
 
-    for merchant in KNOWN_MERCHANTS:
-        if merchant in text_lower:
-            return merchant.title()
+    # Check delivery before food (uber eats should be "delivery" not "food")
+    for category, keywords in EXPENSE_CATEGORIES.items():
+        for keyword in keywords:
+            if keyword in text_lower:
+                return category
 
-    lines = [line.strip() for line in text.split('\n') if line.strip()]
-    if lines:
-        first_line = lines[0]
-        cleaned = re.sub(r'^[\d\s\-\*#]+', '', first_line)
-        cleaned = re.sub(r'[^\w\s&\'-]', '', cleaned).strip()
-        if cleaned and len(cleaned) > 2 and len(cleaned) < 50:
-            return cleaned[:MAX_DESCRIPTION_LENGTH]
-
-    return None
+    return 'receipt'
 
 
 def sanitize_filename(name: str) -> str:
@@ -508,18 +535,15 @@ def process_file(file_path: Path, existing_files: set) -> dict:
 
         result['total'] = extract_total(text)
 
-        merchant = extract_merchant(text)
-        if merchant:
-            result['description'] = merchant
-        else:
-            result['description'] = 'Receipt'
+        category = extract_category(text)
+        result['description'] = category
 
         if estimated:
             result['description'] += ' (date estimated)'
 
         result['new_filename'] = generate_new_filename(
             date,
-            merchant or 'receipt',
+            category,
             file_path.suffix.lower(),
             existing_files
         )
