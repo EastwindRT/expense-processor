@@ -42,19 +42,15 @@ except ImportError:
     HAS_PDFPLUMBER = False
 
 try:
-    import easyocr
-    from PIL import Image, ImageEnhance, ImageFilter
+    import pytesseract
+    from PIL import Image, ImageEnhance, ImageFilter, ImageOps
     HAS_OCR = True
-    # Initialize EasyOCR reader once (downloads model on first run)
-    OCR_READER = easyocr.Reader(['en'], gpu=False, verbose=False)
+    if os.name == 'nt':
+        tesseract_path = Path(r'C:\Program Files\Tesseract-OCR\tesseract.exe')
+        if tesseract_path.exists():
+            pytesseract.pytesseract.tesseract_cmd = str(tesseract_path)
 except ImportError:
     HAS_OCR = False
-    OCR_READER = None
-
-try:
-    from PIL import Image, ImageEnhance, ImageFilter
-except ImportError:
-    pass
 
 # Flask app configuration
 app = Flask(__name__)
@@ -123,17 +119,15 @@ def extract_text_from_pdf(file_path: Path) -> str:
             pass
 
     # OCR fallback for scanned PDFs
-    if HAS_OCR and OCR_READER and HAS_FITZ:
+    if HAS_OCR and HAS_FITZ:
         try:
-            import numpy as np
             doc = fitz.open(file_path)
             for page in doc:
                 pix = page.get_pixmap(dpi=300)
                 img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                img_array = np.array(img)
-                results = OCR_READER.readtext(img_array, detail=1, paragraph=True)
-                results.sort(key=lambda r: r[0][0][1])
-                text += "\n".join([r[1] for r in results]) + "\n"
+                gray = img.convert('L')
+                gray = ImageEnhance.Contrast(gray).enhance(2.5)
+                text += pytesseract.image_to_string(gray, config='--psm 6 --oem 3') + "\n"
             doc.close()
         except Exception as e:
             print(f"PDF OCR fallback error: {e}")
@@ -141,20 +135,70 @@ def extract_text_from_pdf(file_path: Path) -> str:
     return text
 
 
+def preprocess_image(img: Image.Image) -> list[Image.Image]:
+    """Create multiple preprocessed versions for best OCR results."""
+    versions = []
+
+    # Version 1: High contrast grayscale
+    gray = img.convert('L')
+    enhanced = ImageEnhance.Contrast(gray).enhance(2.5)
+    enhanced = ImageEnhance.Sharpness(enhanced).enhance(2.0)
+    versions.append(enhanced)
+
+    # Version 2: Adaptive threshold via strong contrast
+    gray2 = img.convert('L')
+    gray2 = ImageOps.autocontrast(gray2, cutoff=5)
+    gray2 = ImageEnhance.Contrast(gray2).enhance(3.0)
+    versions.append(gray2)
+
+    # Version 3: Scale up small images for better OCR
+    w, h = img.size
+    if w < 1500:
+        scale = 2
+        big = img.resize((w * scale, h * scale), Image.LANCZOS)
+        big_gray = big.convert('L')
+        big_gray = ImageEnhance.Contrast(big_gray).enhance(2.0)
+        versions.append(big_gray)
+
+    return versions
+
+
 def extract_text_from_image(file_path: Path) -> str:
-    """Extract text from image using EasyOCR."""
-    if not HAS_OCR or not OCR_READER:
+    """Extract text from image using Tesseract with multiple preprocessing passes."""
+    if not HAS_OCR:
         print(f"OCR not available for {file_path}")
         return ""
 
     try:
-        results = OCR_READER.readtext(str(file_path), detail=1, paragraph=True)
-        # Sort results top-to-bottom by y coordinate
-        results.sort(key=lambda r: r[0][0][1])
-        lines = [r[1] for r in results]
-        text = "\n".join(lines)
-        print(f"EasyOCR extracted {len(text)} chars from {file_path.name}")
-        return text
+        img = Image.open(file_path)
+        if img.mode not in ('L', 'RGB'):
+            img = img.convert('RGB')
+
+        # Try multiple preprocessing versions, pick best result
+        versions = preprocess_image(img)
+        best_text = ""
+
+        for i, processed in enumerate(versions):
+            # Use psm 6 (block of text) which works well for receipts
+            text = pytesseract.image_to_string(
+                processed,
+                config='--psm 6 --oem 3'
+            )
+            print(f"  Pass {i+1}: {len(text)} chars")
+            if len(text) > len(best_text):
+                best_text = text
+
+        # Also try psm 4 (column of text) on the best preprocessed version
+        if versions:
+            text_col = pytesseract.image_to_string(
+                versions[0],
+                config='--psm 4 --oem 3'
+            )
+            if len(text_col) > len(best_text):
+                best_text = text_col
+
+        print(f"OCR extracted {len(best_text)} chars from {file_path.name}")
+        return best_text
     except Exception as e:
         print(f"OCR error for {file_path}: {e}")
         return ""

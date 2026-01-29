@@ -15,7 +15,9 @@
       "Bash(gh auth:*)",
       "Bash(\"/c/Program Files/GitHub CLI/gh.exe\" auth login --web --git-protocol https)",
       "Bash(\"/c/Program Files/GitHub CLI/gh.exe\" repo create expense-processor --public --source=. --remote=origin --push)",
-      "Bash(git push)"
+      "Bash(git push)",
+      "Bash(python:*)",
+      "Bash(curl:*)"
     ]
   }
 }
