@@ -44,13 +44,28 @@ except ImportError:
 try:
     import pytesseract
     from PIL import Image, ImageEnhance, ImageFilter, ImageOps
-    HAS_OCR = True
+    # Configure Tesseract path
     if os.name == 'nt':
         tesseract_path = Path(r'C:\Program Files\Tesseract-OCR\tesseract.exe')
         if tesseract_path.exists():
             pytesseract.pytesseract.tesseract_cmd = str(tesseract_path)
-except ImportError:
+    else:
+        # Linux: try common paths
+        for p in ['/usr/bin/tesseract', '/usr/local/bin/tesseract']:
+            if Path(p).exists():
+                pytesseract.pytesseract.tesseract_cmd = p
+                break
+    # Verify tesseract actually works
+    try:
+        ver = pytesseract.get_tesseract_version()
+        HAS_OCR = True
+        print(f"Tesseract OCR version {ver} - OK")
+    except Exception as e:
+        HAS_OCR = False
+        print(f"Tesseract not working: {e}")
+except ImportError as e:
     HAS_OCR = False
+    print(f"OCR import failed: {e}")
 
 # Flask app configuration
 app = Flask(__name__)
@@ -530,6 +545,26 @@ def cleanup_session_folder():
 
 
 # Routes
+@app.route('/health')
+def health():
+    """Health check showing OCR status."""
+    import shutil
+    tess_path = shutil.which('tesseract')
+    info = {
+        'ocr_available': HAS_OCR,
+        'fitz_available': HAS_FITZ,
+        'pdfplumber_available': HAS_PDFPLUMBER,
+        'tesseract_path': tess_path,
+        'os': os.name,
+    }
+    if HAS_OCR:
+        try:
+            info['tesseract_version'] = str(pytesseract.get_tesseract_version())
+        except Exception as e:
+            info['tesseract_error'] = str(e)
+    return jsonify(info)
+
+
 @app.route('/')
 def index():
     """Home page with upload form."""
