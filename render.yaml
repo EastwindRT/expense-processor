@@ -7,3 +7,5 @@ services:
         generateValue: true
       - key: FLASK_DEBUG
         value: "false"
+      - key: OCR_API_KEY
+        sync: false

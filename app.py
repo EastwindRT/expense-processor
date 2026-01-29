@@ -41,31 +41,16 @@ try:
 except ImportError:
     HAS_PDFPLUMBER = False
 
-try:
-    import pytesseract
-    from PIL import Image, ImageEnhance, ImageFilter, ImageOps
-    # Configure Tesseract path
-    if os.name == 'nt':
-        tesseract_path = Path(r'C:\Program Files\Tesseract-OCR\tesseract.exe')
-        if tesseract_path.exists():
-            pytesseract.pytesseract.tesseract_cmd = str(tesseract_path)
-    else:
-        # Linux: try common paths
-        for p in ['/usr/bin/tesseract', '/usr/local/bin/tesseract']:
-            if Path(p).exists():
-                pytesseract.pytesseract.tesseract_cmd = p
-                break
-    # Verify tesseract actually works
-    try:
-        ver = pytesseract.get_tesseract_version()
-        HAS_OCR = True
-        print(f"Tesseract OCR version {ver} - OK")
-    except Exception as e:
-        HAS_OCR = False
-        print(f"Tesseract not working: {e}")
-except ImportError as e:
-    HAS_OCR = False
-    print(f"OCR import failed: {e}")
+import requests as http_requests
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+
+# OCR.space API for accurate image OCR (free: 25,000 requests/month)
+OCR_API_KEY = os.environ.get('OCR_API_KEY', '')
+HAS_OCR = bool(OCR_API_KEY)
+if HAS_OCR:
+    print(f"OCR.space API configured")
+else:
+    print("WARNING: OCR_API_KEY not set - image OCR disabled. Get a free key at https://ocr.space/ocrapi/freekey")
 
 # Flask app configuration
 app = Flask(__name__)
@@ -133,16 +118,18 @@ def extract_text_from_pdf(file_path: Path) -> str:
         except Exception:
             pass
 
-    # OCR fallback for scanned PDFs
+    # OCR fallback for scanned PDFs - save page as image, send to API
     if HAS_OCR and HAS_FITZ:
         try:
+            import tempfile
             doc = fitz.open(file_path)
             for page in doc:
                 pix = page.get_pixmap(dpi=300)
-                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                gray = img.convert('L')
-                gray = ImageEnhance.Contrast(gray).enhance(2.5)
-                text += pytesseract.image_to_string(gray, config='--psm 6 --oem 3') + "\n"
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                    pix.save(tmp.name)
+                    page_text = extract_text_from_image(Path(tmp.name))
+                    text += page_text + "\n"
+                    os.unlink(tmp.name)
             doc.close()
         except Exception as e:
             print(f"PDF OCR fallback error: {e}")
@@ -150,72 +137,43 @@ def extract_text_from_pdf(file_path: Path) -> str:
     return text
 
 
-def preprocess_image(img: Image.Image) -> list[Image.Image]:
-    """Create multiple preprocessed versions for best OCR results."""
-    versions = []
-
-    # Version 1: High contrast grayscale
-    gray = img.convert('L')
-    enhanced = ImageEnhance.Contrast(gray).enhance(2.5)
-    enhanced = ImageEnhance.Sharpness(enhanced).enhance(2.0)
-    versions.append(enhanced)
-
-    # Version 2: Adaptive threshold via strong contrast
-    gray2 = img.convert('L')
-    gray2 = ImageOps.autocontrast(gray2, cutoff=5)
-    gray2 = ImageEnhance.Contrast(gray2).enhance(3.0)
-    versions.append(gray2)
-
-    # Version 3: Scale up small images for better OCR
-    w, h = img.size
-    if w < 1500:
-        scale = 2
-        big = img.resize((w * scale, h * scale), Image.LANCZOS)
-        big_gray = big.convert('L')
-        big_gray = ImageEnhance.Contrast(big_gray).enhance(2.0)
-        versions.append(big_gray)
-
-    return versions
-
-
 def extract_text_from_image(file_path: Path) -> str:
-    """Extract text from image using Tesseract with multiple preprocessing passes."""
+    """Extract text from image using OCR.space cloud API."""
     if not HAS_OCR:
-        print(f"OCR not available for {file_path}")
+        print(f"OCR not available for {file_path.name} - no API key")
         return ""
 
     try:
-        img = Image.open(file_path)
-        if img.mode not in ('L', 'RGB'):
-            img = img.convert('RGB')
-
-        # Try multiple preprocessing versions, pick best result
-        versions = preprocess_image(img)
-        best_text = ""
-
-        for i, processed in enumerate(versions):
-            # Use psm 6 (block of text) which works well for receipts
-            text = pytesseract.image_to_string(
-                processed,
-                config='--psm 6 --oem 3'
+        with open(file_path, 'rb') as f:
+            response = http_requests.post(
+                'https://api.ocr.space/parse/image',
+                files={'file': (file_path.name, f, 'image/jpeg')},
+                data={
+                    'apikey': OCR_API_KEY,
+                    'language': 'eng',
+                    'isOverlayRequired': 'false',
+                    'scale': 'true',
+                    'OCREngine': '2',  # Engine 2 is better for receipts
+                },
+                timeout=60
             )
-            print(f"  Pass {i+1}: {len(text)} chars")
-            if len(text) > len(best_text):
-                best_text = text
 
-        # Also try psm 4 (column of text) on the best preprocessed version
-        if versions:
-            text_col = pytesseract.image_to_string(
-                versions[0],
-                config='--psm 4 --oem 3'
-            )
-            if len(text_col) > len(best_text):
-                best_text = text_col
+        result = response.json()
 
-        print(f"OCR extracted {len(best_text)} chars from {file_path.name}")
-        return best_text
+        if result.get('IsErroredOnProcessing'):
+            error_msg = result.get('ErrorMessage', ['Unknown error'])
+            print(f"OCR API error for {file_path.name}: {error_msg}")
+            return ""
+
+        parsed = result.get('ParsedResults', [])
+        if parsed:
+            text = parsed[0].get('ParsedText', '')
+            print(f"OCR.space extracted {len(text)} chars from {file_path.name}")
+            return text
+
+        return ""
     except Exception as e:
-        print(f"OCR error for {file_path}: {e}")
+        print(f"OCR error for {file_path.name}: {e}")
         return ""
 
 
