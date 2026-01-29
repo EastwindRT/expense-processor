@@ -137,6 +137,41 @@ def extract_text_from_pdf(file_path: Path) -> str:
     return text
 
 
+def compress_image_for_ocr(file_path: Path) -> bytes:
+    """Compress image to under 1MB for OCR.space free tier."""
+    img = Image.open(file_path)
+    # Convert to RGB if needed (handles RGBA, P mode, etc.)
+    if img.mode not in ('RGB', 'L'):
+        img = img.convert('RGB')
+
+    # Resize if very large (keep readable but reduce file size)
+    max_dim = 2500
+    if max(img.size) > max_dim:
+        ratio = max_dim / max(img.size)
+        new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
+        img = img.resize(new_size, Image.LANCZOS)
+
+    # Enhance contrast for better OCR
+    img = ImageEnhance.Contrast(img).enhance(1.3)
+    img = ImageEnhance.Sharpness(img).enhance(1.5)
+
+    # Save as JPEG with decreasing quality until under 1MB
+    for quality in [85, 70, 55, 40]:
+        buf = io.BytesIO()
+        img.save(buf, format='JPEG', quality=quality)
+        if buf.tell() < 1024 * 1024:  # Under 1MB
+            buf.seek(0)
+            return buf.read()
+        buf.close()
+
+    # Last resort: resize further
+    img = img.resize((img.size[0] // 2, img.size[1] // 2), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG', quality=50)
+    buf.seek(0)
+    return buf.read()
+
+
 def extract_text_from_image(file_path: Path) -> str:
     """Extract text from image using OCR.space cloud API."""
     if not HAS_OCR:
@@ -144,26 +179,45 @@ def extract_text_from_image(file_path: Path) -> str:
         return ""
 
     try:
-        with open(file_path, 'rb') as f:
+        image_data = compress_image_for_ocr(file_path)
+        print(f"Sending {file_path.name} to OCR.space ({len(image_data) // 1024}KB)")
+
+        response = http_requests.post(
+            'https://api.ocr.space/parse/image',
+            files={'file': (file_path.stem + '.jpg', image_data, 'image/jpeg')},
+            data={
+                'apikey': OCR_API_KEY,
+                'language': 'eng',
+                'isOverlayRequired': 'false',
+                'scale': 'true',
+                'OCREngine': '2',
+            },
+            timeout=60
+        )
+
+        result = response.json()
+        print(f"OCR.space response for {file_path.name}: error={result.get('IsErroredOnProcessing')}, "
+              f"exit_code={result.get('OCRExitCode')}")
+
+        if result.get('IsErroredOnProcessing'):
+            error_msg = result.get('ErrorMessage', ['Unknown error'])
+            print(f"OCR API error for {file_path.name}: {error_msg}")
+            # Try Engine 1 as fallback
             response = http_requests.post(
                 'https://api.ocr.space/parse/image',
-                files={'file': (file_path.name, f, 'image/jpeg')},
+                files={'file': (file_path.stem + '.jpg', image_data, 'image/jpeg')},
                 data={
                     'apikey': OCR_API_KEY,
                     'language': 'eng',
                     'isOverlayRequired': 'false',
                     'scale': 'true',
-                    'OCREngine': '2',  # Engine 2 is better for receipts
+                    'OCREngine': '1',
                 },
                 timeout=60
             )
-
-        result = response.json()
-
-        if result.get('IsErroredOnProcessing'):
-            error_msg = result.get('ErrorMessage', ['Unknown error'])
-            print(f"OCR API error for {file_path.name}: {error_msg}")
-            return ""
+            result = response.json()
+            if result.get('IsErroredOnProcessing'):
+                return ""
 
         parsed = result.get('ParsedResults', [])
         if parsed:
@@ -516,10 +570,7 @@ def health():
         'os': os.name,
     }
     if HAS_OCR:
-        try:
-            info['tesseract_version'] = str(pytesseract.get_tesseract_version())
-        except Exception as e:
-            info['tesseract_error'] = str(e)
+        info['ocr_engine'] = 'ocr.space'
     return jsonify(info)
 
 
