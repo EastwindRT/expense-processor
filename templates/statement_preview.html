@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Review Transactions</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #fafafa;
+            color: #111;
+            min-height: 100vh;
+            padding: 40px 20px;
+        }
+        .container { max-width: 1000px; margin: 0 auto; }
+        h1 { font-size: 1.5rem; font-weight: 500; margin-bottom: 8px; }
+        .subtitle { color: #666; font-size: 0.95rem; margin-bottom: 32px; }
+        .back { font-size: 0.85rem; color: #999; margin-bottom: 24px; display: block; }
+        .back a { color: #555; text-decoration: none; }
+        .back a:hover { color: #111; }
+        .flash {
+            padding: 12px 16px;
+            margin-bottom: 20px;
+            border-radius: 6px;
+            font-size: 0.9rem;
+        }
+        .flash.success { background: #e8f5e9; color: #2e7d32; }
+        .flash.error { background: #ffebee; color: #c62828; }
+        .stats {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 28px;
+            flex-wrap: wrap;
+        }
+        .stat {
+            padding: 14px 20px;
+            background: #fff;
+            border: 1px solid #eee;
+            border-radius: 6px;
+            min-width: 120px;
+        }
+        .stat-num { font-size: 1.4rem; font-weight: 600; }
+        .stat-label { font-size: 0.78rem; color: #666; margin-top: 3px; }
+        .error-list {
+            background: #fff5f5;
+            border: 1px solid #ffcdd2;
+            border-radius: 6px;
+            padding: 16px;
+            margin-bottom: 24px;
+            font-size: 0.88rem;
+        }
+        .error-list h3 { color: #c62828; margin-bottom: 10px; font-size: 0.9rem; }
+        .error-list li { color: #555; margin-left: 18px; margin-bottom: 4px; }
+        .toolbar {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            margin-bottom: 16px;
+            flex-wrap: wrap;
+        }
+        .toolbar input[type=text] {
+            flex: 1;
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 0.88rem;
+            min-width: 180px;
+        }
+        .toolbar-btn {
+            padding: 8px 16px;
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 0.82rem;
+            cursor: pointer;
+            color: #555;
+        }
+        .toolbar-btn:hover { border-color: #999; color: #111; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #fff;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid #eee;
+            font-size: 0.88rem;
+        }
+        thead tr { background: #f5f5f5; }
+        th {
+            text-align: left;
+            padding: 11px 12px;
+            font-weight: 500;
+            font-size: 0.8rem;
+            color: #555;
+            border-bottom: 1px solid #eee;
+            white-space: nowrap;
+        }
+        td { padding: 6px 8px; border-bottom: 1px solid #f0f0f0; vertical-align: middle; }
+        tr:last-child td { border-bottom: none; }
+        tr.skipped td { opacity: 0.35; }
+        td input[type=text] {
+            width: 100%;
+            border: 1px solid transparent;
+            padding: 5px 8px;
+            border-radius: 4px;
+            font-size: 0.88rem;
+            font-family: inherit;
+            background: transparent;
+        }
+        td input[type=text]:focus {
+            outline: none;
+            border-color: #bbb;
+            background: #fafafa;
+        }
+        td input[type=text]:hover { border-color: #ddd; background: #fafafa; }
+        .amount-cell input { text-align: right; font-family: monospace; }
+        .source-cell { color: #999; font-size: 0.78rem; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .skip-cell { text-align: center; width: 40px; }
+        .btn {
+            display: inline-block;
+            padding: 10px 24px;
+            background: #111;
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .btn:hover { background: #333; }
+        .btn-lg { padding: 14px 32px; font-size: 1rem; }
+        .actions { margin-top: 28px; display: flex; gap: 12px; align-items: center; }
+        .no-txn {
+            text-align: center;
+            padding: 60px 20px;
+            color: #999;
+        }
+        .no-txn h2 { font-size: 1.1rem; font-weight: 400; margin-bottom: 8px; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <p class="back"><a href="/statement">← Upload New Statements</a></p>
+    <h1>Review Transactions</h1>
+    <p class="subtitle">Edit or skip any row before downloading. All changes are yours to keep.</p>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+                <div class="flash {{ category }}">{{ message }}</div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+
+    {% if errors %}
+    <div class="error-list">
+        <h3>⚠ Some files had issues</h3>
+        <ul>
+            {% for e in errors %}
+            <li><strong>{{ e.file }}</strong> — {{ e.error }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+
+    <div class="stats">
+        <div class="stat">
+            <div class="stat-num">{{ file_count }}</div>
+            <div class="stat-label">statements</div>
+        </div>
+        <div class="stat">
+            <div class="stat-num" id="txnCount">{{ transactions|length }}</div>
+            <div class="stat-label">transactions</div>
+        </div>
+        <div class="stat">
+            <div class="stat-num" id="totalAmount">—</div>
+            <div class="stat-label">total spend</div>
+        </div>
+    </div>
+
+    {% if transactions %}
+    <div class="toolbar">
+        <input type="text" id="searchBox" placeholder="Filter by description or source…" oninput="filterRows(this.value)">
+        <button type="button" class="toolbar-btn" onclick="skipAll(false)">Select all</button>
+        <button type="button" class="toolbar-btn" onclick="skipAll(true)">Deselect all</button>
+    </div>
+
+    <form action="/statement/process" method="post" id="processForm">
+        <input type="hidden" name="count" value="{{ transactions|length }}">
+        <table id="txnTable">
+            <thead>
+                <tr>
+                    <th class="skip-cell" title="Uncheck to exclude from CSV">✓</th>
+                    <th style="min-width:110px">Date</th>
+                    <th>Description</th>
+                    <th style="min-width:90px">Amount</th>
+                    <th>Source File</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for t in transactions %}
+                <tr data-idx="{{ loop.index0 }}" data-desc="{{ t.description|lower }}" data-source="{{ t.source_file|lower }}">
+                    <td class="skip-cell">
+                        <input type="checkbox" name="include_{{ loop.index0 }}" checked
+                               onchange="toggleRow(this, {{ loop.index0 }})">
+                    </td>
+                    <td>
+                        <input type="text" name="date_{{ loop.index0 }}" value="{{ t.date }}">
+                    </td>
+                    <td>
+                        <input type="text" name="desc_{{ loop.index0 }}" value="{{ t.description }}">
+                    </td>
+                    <td class="amount-cell">
+                        <input type="text" name="amount_{{ loop.index0 }}" value="{{ t.amount }}">
+                    </td>
+                    <td class="source-cell" title="{{ t.source_file }}">
+                        <input type="hidden" name="source_{{ loop.index0 }}" value="{{ t.source_file }}">
+                        {{ t.source_file }}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+
+        <!-- skip flags are submitted for unchecked rows -->
+        <div id="skipFlags"></div>
+
+        <div class="actions">
+            <button type="submit" class="btn btn-lg">Download CSV</button>
+            <span style="color:#999;font-size:0.85rem;" id="selectedCount"></span>
+        </div>
+    </form>
+
+    {% else %}
+    <div class="no-txn">
+        <h2>No transactions were detected</h2>
+        <p>Try uploading a different statement format or check that the PDF contains selectable text.</p>
+        <br>
+        <a href="/statement" class="btn">Upload Again</a>
+    </div>
+    {% endif %}
+</div>
+
+<script>
+    // Track which rows are included
+    const total = {{ transactions|length }};
+    const included = new Array(total).fill(true);
+
+    function toggleRow(cb, idx) {
+        included[idx] = cb.checked;
+        cb.closest('tr').classList.toggle('skipped', !cb.checked);
+        updateStats();
+    }
+
+    function skipAll(skip) {
+        document.querySelectorAll('#txnTable tbody tr').forEach(row => {
+            const visible = row.style.display !== 'none';
+            if (!visible) return;
+            const idx = parseInt(row.dataset.idx);
+            const cb = row.querySelector('input[type=checkbox]');
+            cb.checked = !skip;
+            included[idx] = !skip;
+            row.classList.toggle('skipped', skip);
+        });
+        updateStats();
+    }
+
+    function filterRows(query) {
+        const q = query.toLowerCase();
+        document.querySelectorAll('#txnTable tbody tr').forEach(row => {
+            const desc = row.dataset.desc || '';
+            const src = row.dataset.source || '';
+            row.style.display = (!q || desc.includes(q) || src.includes(q)) ? '' : 'none';
+        });
+    }
+
+    function updateStats() {
+        // Count selected (visible or not — all included rows count)
+        const selectedRows = document.querySelectorAll('#txnTable tbody tr:not(.skipped)');
+        const count = selectedRows.length;
+        document.getElementById('txnCount').textContent = count;
+        document.getElementById('selectedCount').textContent =
+            count === total ? `All ${total} rows selected` : `${count} of ${total} rows selected`;
+
+        // Sum amounts for included rows
+        let sum = 0;
+        selectedRows.forEach(row => {
+            const idx = parseInt(row.dataset.idx);
+            const amtInput = row.querySelector(`input[name="amount_${idx}"]`);
+            if (amtInput) {
+                const val = parseFloat(amtInput.value.replace(/[^0-9.\-]/g, ''));
+                if (!isNaN(val)) sum += val;
+            }
+        });
+        document.getElementById('totalAmount').textContent =
+            sum >= 0 ? `$${sum.toFixed(2)}` : `-$${Math.abs(sum).toFixed(2)}`;
+
+        // Build hidden skip flags
+        const flags = document.getElementById('skipFlags');
+        flags.innerHTML = '';
+        for (let i = 0; i < total; i++) {
+            if (!included[i]) {
+                const inp = document.createElement('input');
+                inp.type = 'hidden';
+                inp.name = `skip_${i}`;
+                inp.value = '1';
+                flags.appendChild(inp);
+            }
+        }
+    }
+
+    // Init stats on load
+    updateStats();
+</script>
+</body>
+</html>

@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Transactions Saved</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #fafafa;
+            color: #111;
+            min-height: 100vh;
+            padding: 60px 20px;
+        }
+        .container { max-width: 500px; margin: 0 auto; text-align: center; }
+        h1 { font-size: 1.5rem; font-weight: 500; margin-bottom: 12px; }
+        .subtitle { color: #666; font-size: 0.95rem; margin-bottom: 40px; }
+        .count {
+            font-size: 3rem;
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+        .count-label { color: #666; margin-bottom: 40px; }
+        .btn {
+            display: inline-block;
+            padding: 12px 32px;
+            background: #111;
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            font-size: 0.95rem;
+            cursor: pointer;
+            text-decoration: none;
+            transition: background 0.2s;
+            margin: 0 6px 12px;
+        }
+        .btn:hover { background: #333; }
+        .btn-outline {
+            background: #fff;
+            color: #111;
+            border: 1px solid #ddd;
+        }
+        .btn-outline:hover { background: #f5f5f5; }
+        .flash {
+            padding: 12px 16px;
+            margin-bottom: 24px;
+            border-radius: 6px;
+            font-size: 0.9rem;
+        }
+        .flash.success { background: #e8f5e9; color: #2e7d32; }
+    </style>
+</head>
+<body>
+<div class="container">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+                <div class="flash {{ category }}">{{ message }}</div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+
+    <div class="count">{{ row_count }}</div>
+    <div class="count-label">transactions saved to CSV</div>
+
+    <div>
+        <a href="/statement/download" class="btn">Download transactions.csv</a>
+    </div>
+    <div style="margin-top: 12px;">
+        <a href="/statement" class="btn btn-outline">Process More Statements</a>
+        <a href="/" class="btn btn-outline">Receipt Processor</a>
+    </div>
+</div>
+</body>
+</html>

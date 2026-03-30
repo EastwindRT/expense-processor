@@ -562,6 +562,187 @@ def process_file(file_path: Path, existing_files: set) -> dict:
     return result
 
 
+# Statement processing limits
+MAX_STATEMENT_FILES = 20
+MAX_STATEMENT_SIZE_MB = 20
+
+
+def normalize_transaction_date(date_str: str, statement_year: str = None) -> Optional[str]:
+    """Convert various date formats found in credit card statements to YYYY-MM-DD."""
+    year = statement_year or str(datetime.now().year)
+    MONTHS = {
+        'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04',
+        'may': '05', 'jun': '06', 'jul': '07', 'aug': '08',
+        'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12'
+    }
+    date_str = date_str.strip().rstrip('.,')
+
+    # YYYY-MM-DD
+    m = re.match(r'^(\d{4})-(\d{2})-(\d{2})$', date_str)
+    if m:
+        try:
+            datetime.strptime(date_str, '%Y-%m-%d')
+            return date_str
+        except ValueError:
+            pass
+
+    # MM/DD/YYYY
+    m = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{4})$', date_str)
+    if m:
+        result = f"{m.group(3)}-{m.group(1).zfill(2)}-{m.group(2).zfill(2)}"
+        try:
+            datetime.strptime(result, '%Y-%m-%d')
+            return result
+        except ValueError:
+            pass
+
+    # MM/DD/YY
+    m = re.match(r'^(\d{1,2})/(\d{1,2})/(\d{2})$', date_str)
+    if m:
+        result = f"20{m.group(3)}-{m.group(1).zfill(2)}-{m.group(2).zfill(2)}"
+        try:
+            datetime.strptime(result, '%Y-%m-%d')
+            return result
+        except ValueError:
+            pass
+
+    # MM/DD (no year — use statement year)
+    m = re.match(r'^(\d{1,2})/(\d{1,2})$', date_str)
+    if m:
+        result = f"{year}-{m.group(1).zfill(2)}-{m.group(2).zfill(2)}"
+        try:
+            datetime.strptime(result, '%Y-%m-%d')
+            return result
+        except ValueError:
+            pass
+
+    # Month-name formats: "Jan 15", "Jan 15, 2024", "Jan 15/24", "January 15, 2024"
+    m = re.match(
+        r'^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(\d{1,2})(?:[,/.]\s*(\d{2,4}))?$',
+        date_str, re.IGNORECASE
+    )
+    if m:
+        month_num = MONTHS.get(m.group(1).lower()[:3], '01')
+        day = m.group(2).zfill(2)
+        yr = m.group(3)
+        if yr:
+            yr = f"20{yr}" if len(yr) == 2 else yr
+        else:
+            yr = year
+        result = f"{yr}-{month_num}-{day}"
+        try:
+            datetime.strptime(result, '%Y-%m-%d')
+            return result
+        except ValueError:
+            pass
+
+    return None
+
+
+def extract_transactions_from_statement(text: str, source_filename: str) -> list[dict]:
+    """
+    Extract individual line-item transactions from a credit card statement.
+    Handles TD, RBC, CIBC, BMO, Scotiabank and similar formats.
+    Returns list of {date, description, amount, source_file}.
+    """
+    transactions = []
+
+    # Detect the statement year from the most prominent year in the document
+    years_found = re.findall(r'\b(20\d{2})\b', text)
+    statement_year = years_found[0] if years_found else str(datetime.now().year)
+
+    SKIP_KEYWORDS = {
+        'opening balance', 'closing balance', 'credit limit', 'available credit',
+        'minimum payment', 'payment due', 'statement date', 'account number',
+        'previous balance', 'new balance', 'past due', 'total fees',
+        'total interest', 'annual fee', 'monthly fee', 'page ', 'continued',
+        'date of transaction', 'date of posting', 'transaction date', 'posting date',
+        'description', 'amount', 'debit', 'credit', '---', '===',
+    }
+
+    MONTH_PAT = r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?'
+
+    # Ordered list of date patterns that can appear at the start of a transaction line
+    date_start_pats = [
+        re.compile(r'^(\d{4}-\d{2}-\d{2})\s+', re.IGNORECASE),
+        re.compile(r'^(\d{1,2}/\d{1,2}/\d{2,4})\s+', re.IGNORECASE),
+        re.compile(r'^(' + MONTH_PAT + r'\s+\d{1,2}(?:[,/.]\s*\d{2,4})?)\s+', re.IGNORECASE),
+        re.compile(r'^(\d{1,2}/\d{1,2})\s+', re.IGNORECASE),
+    ]
+
+    # Amount at the end of a line, optionally followed by "CR" for credits/refunds
+    amount_end_re = re.compile(
+        r'^(.+?)\s+(-?\$?[\d,]+\.\d{2})\s*(CR|cr|Cr)?\s*$'
+    )
+
+    for raw_line in text.split('\n'):
+        line = raw_line.strip()
+        if not line or len(line) < 8:
+            continue
+
+        # Skip header/summary lines
+        line_lower = line.lower()
+        if any(kw in line_lower for kw in SKIP_KEYWORDS):
+            continue
+
+        # Line must end with a dollar amount (optionally followed by CR)
+        amount_m = amount_end_re.match(line)
+        if not amount_m:
+            continue
+
+        prefix = amount_m.group(1).strip()
+        raw_amount = amount_m.group(2)
+        is_credit = bool(amount_m.group(3))
+
+        # Validate amount is a plausible transaction size
+        try:
+            amount_val = float(raw_amount.replace('$', '').replace(',', ''))
+            if not (0.01 <= abs(amount_val) <= 50000):
+                continue
+        except ValueError:
+            continue
+
+        # Extract date from start of prefix
+        date = None
+        desc_start = 0
+        for pat in date_start_pats:
+            m = pat.match(prefix)
+            if m:
+                date = normalize_transaction_date(m.group(1), statement_year)
+                if date:
+                    desc_start = m.end()
+                    # Some statements have TWO dates (transaction + posting date) — skip the second
+                    remaining = prefix[desc_start:]
+                    for pat2 in date_start_pats:
+                        m2 = pat2.match(remaining)
+                        if m2 and normalize_transaction_date(m2.group(1), statement_year):
+                            desc_start += m2.end()
+                            break
+                    break
+
+        if not date:
+            continue
+
+        description = re.sub(r'\s{2,}', ' ', prefix[desc_start:]).strip()
+        if not description or len(description) < 2:
+            continue
+
+        # Format amount — credits (refunds) stored as negative
+        if is_credit or amount_val < 0:
+            formatted_amount = f"-${abs(amount_val):.2f}"
+        else:
+            formatted_amount = f"${amount_val:.2f}"
+
+        transactions.append({
+            'date': date,
+            'description': description[:80],
+            'amount': formatted_amount,
+            'source_file': source_filename,
+        })
+
+    return transactions
+
+
 def get_session_folder() -> Path:
     """Get or create a unique session folder for uploads."""
     if 'session_id' not in session:
@@ -880,6 +1061,164 @@ def reset():
     session.clear()
     flash('Session reset. Ready for new uploads.', 'info')
     return redirect(url_for('index'))
+
+
+# ─── Credit Card Statement Routes ───────────────────────────────────────────
+
+@app.route('/statement')
+def statement_index():
+    """Upload page for credit card monthly statements."""
+    return render_template('statement.html', max_files=MAX_STATEMENT_FILES, max_mb=MAX_STATEMENT_SIZE_MB)
+
+
+@app.route('/statement/upload', methods=['POST'])
+def statement_upload():
+    """Handle statement file uploads with size/count validation."""
+    if 'files' not in request.files:
+        flash('No files selected', 'error')
+        return redirect(url_for('statement_index'))
+
+    files = [f for f in request.files.getlist('files') if f and f.filename and allowed_file(f.filename)]
+
+    if not files:
+        flash('No valid files. Supported formats: PDF, JPG, PNG', 'error')
+        return redirect(url_for('statement_index'))
+
+    if len(files) > MAX_STATEMENT_FILES:
+        flash(
+            f'Too many files ({len(files)}). Maximum is {MAX_STATEMENT_FILES} statements at once. '
+            f'Please reduce the number of files.',
+            'error'
+        )
+        return redirect(url_for('statement_index'))
+
+    # Check total upload size before saving
+    total_bytes = 0
+    for f in files:
+        f.seek(0, 2)
+        total_bytes += f.tell()
+        f.seek(0)
+
+    total_mb = total_bytes / (1024 * 1024)
+    if total_mb > MAX_STATEMENT_SIZE_MB:
+        flash(
+            f'Total file size is {total_mb:.1f} MB, which exceeds the {MAX_STATEMENT_SIZE_MB} MB limit. '
+            f'Please reduce the number of files or use smaller PDFs.',
+            'error'
+        )
+        return redirect(url_for('statement_index'))
+
+    cleanup_session_folder()
+    session_folder = get_session_folder()
+    session['mode'] = 'statement'
+
+    saved = 0
+    for f in files:
+        f.save(session_folder / secure_filename(f.filename))
+        saved += 1
+
+    flash(f'{saved} statement(s) uploaded ({total_mb:.1f} MB)', 'success')
+    return redirect(url_for('statement_preview'))
+
+
+@app.route('/statement/preview')
+def statement_preview():
+    """Extract all transactions from uploaded statements and show editable preview."""
+    if session.get('mode') != 'statement':
+        return redirect(url_for('statement_index'))
+
+    session_folder = get_session_folder()
+    files = sorted(
+        [f for f in session_folder.iterdir() if f.suffix.lower() in SUPPORTED_EXTENSIONS],
+        key=lambda p: p.name.lower()
+    )
+
+    if not files:
+        flash('No files found. Please upload statements first.', 'error')
+        return redirect(url_for('statement_index'))
+
+    all_transactions = []
+    errors = []
+
+    for file_path in files:
+        try:
+            text = extract_text(file_path)
+            if not text.strip():
+                errors.append({'file': file_path.name, 'error': 'Could not extract text from this file'})
+                continue
+            txns = extract_transactions_from_statement(text, file_path.name)
+            all_transactions.extend(txns)
+            if not txns:
+                errors.append({'file': file_path.name, 'error': 'No transactions detected'})
+        except Exception as e:
+            errors.append({'file': file_path.name, 'error': str(e)})
+
+    return render_template(
+        'statement_preview.html',
+        transactions=all_transactions,
+        errors=errors,
+        file_count=len(files),
+    )
+
+
+@app.route('/statement/process', methods=['POST'])
+def statement_process():
+    """Write confirmed transactions to CSV."""
+    session_folder = get_session_folder()
+
+    count = int(request.form.get('count', 0))
+    if count == 0:
+        flash('No transactions to save.', 'error')
+        return redirect(url_for('statement_index'))
+
+    rows = []
+    for i in range(count):
+        if request.form.get(f'skip_{i}'):
+            continue
+        rows.append({
+            'date': request.form.get(f'date_{i}', ''),
+            'description': request.form.get(f'desc_{i}', ''),
+            'amount': request.form.get(f'amount_{i}', ''),
+            'source_file': request.form.get(f'source_{i}', ''),
+        })
+
+    if not rows:
+        flash('All rows were skipped — nothing to save.', 'error')
+        return redirect(url_for('statement_preview'))
+
+    csv_path = session_folder / 'transactions.csv'
+    processed_at = datetime.now().isoformat()
+
+    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f, quoting=csv.QUOTE_ALL)
+        writer.writerow(['Date', 'Description', 'Amount', 'SourceFile', 'ProcessedAt'])
+        for r in rows:
+            writer.writerow([r['date'], r['description'], r['amount'], r['source_file'], processed_at])
+
+    session['statement_row_count'] = len(rows)
+    flash(f'Saved {len(rows)} transactions to CSV.', 'success')
+    return redirect(url_for('statement_results'))
+
+
+@app.route('/statement/results')
+def statement_results():
+    """Show download link after processing."""
+    if 'statement_row_count' not in session:
+        return redirect(url_for('statement_index'))
+    return render_template('statement_results.html', row_count=session['statement_row_count'])
+
+
+@app.route('/statement/download')
+def statement_download():
+    """Download the generated transactions CSV."""
+    session_folder = get_session_folder()
+    csv_path = session_folder / 'transactions.csv'
+
+    if not csv_path.exists():
+        flash('CSV not found. Please process statements first.', 'error')
+        return redirect(url_for('statement_index'))
+
+    return send_file(csv_path, as_attachment=True, download_name='transactions.csv')
 
 
 if __name__ == '__main__':

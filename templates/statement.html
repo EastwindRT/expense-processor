@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Expense Processor</title>
+    <title>Statement Processor</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
@@ -16,6 +16,9 @@
         .container { max-width: 600px; margin: 0 auto; }
         h1 { font-size: 1.5rem; font-weight: 500; margin-bottom: 8px; }
         .subtitle { color: #666; font-size: 0.95rem; margin-bottom: 40px; }
+        .back { font-size: 0.85rem; color: #999; margin-bottom: 32px; display: block; }
+        .back a { color: #555; text-decoration: none; }
+        .back a:hover { color: #111; }
         .flash {
             padding: 12px 16px;
             margin-bottom: 24px;
@@ -37,6 +40,11 @@
         .upload-area:hover, .upload-area.dragover { border-color: #111; }
         .upload-area p { color: #666; margin-bottom: 16px; }
         .upload-area input { display: none; }
+        .note {
+            margin-top: 12px;
+            font-size: 0.82rem;
+            color: #aaa;
+        }
         .btn {
             display: inline-block;
             padding: 10px 24px;
@@ -55,18 +63,15 @@
             display: flex;
             align-items: center;
             justify-content: space-between;
-            padding: 12px 16px;
+            padding: 10px 16px;
             background: #fff;
             border: 1px solid #eee;
             border-radius: 6px;
             margin-bottom: 8px;
-            font-size: 0.9rem;
+            font-size: 0.88rem;
         }
-        .file-item .remove {
-            color: #999;
-            cursor: pointer;
-            padding: 4px 8px;
-        }
+        .file-item .size { color: #aaa; font-size: 0.8rem; margin-left: 8px; }
+        .file-item .remove { color: #999; cursor: pointer; padding: 4px 8px; }
         .file-item .remove:hover { color: #c62828; }
         .submit-btn { width: 100%; margin-top: 24px; padding: 14px; }
         .footer { margin-top: 40px; text-align: center; color: #999; font-size: 0.8rem; }
@@ -74,8 +79,9 @@
 </head>
 <body>
     <div class="container">
-        <h1>Expense Processor</h1>
-        <p class="subtitle">Upload receipts to extract and organize expense data</p>
+        <p class="back"><a href="/">← Receipt Processor</a></p>
+        <h1>Credit Card Statement Processor</h1>
+        <p class="subtitle">Upload monthly statements to extract all line-item transactions into one CSV</p>
 
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
@@ -85,52 +91,76 @@
             {% endif %}
         {% endwith %}
 
-        <form action="{{ url_for('upload_files') }}" method="post" enctype="multipart/form-data" id="uploadForm">
+        <form action="/statement/upload" method="post" enctype="multipart/form-data" id="uploadForm">
             <div class="upload-area" id="uploadArea">
-                <p>Drop files here or click to browse</p>
-                <input type="file" name="files" id="fileInput" multiple accept=".pdf,.jpg,.jpeg,.png,.jfif">
+                <p>Drop credit card statement PDFs here or click to browse</p>
+                <input type="file" name="files" id="fileInput" multiple accept=".pdf,.jpg,.jpeg,.png">
                 <button type="button" class="btn" onclick="document.getElementById('fileInput').click()">
-                    Select Files
+                    Select Statements
                 </button>
+                <p class="note">Max {{ max_files }} files · Max {{ max_mb }} MB total</p>
             </div>
             <div class="file-list" id="fileList"></div>
-            <button type="submit" class="btn submit-btn" id="submitBtn" disabled>Upload & Extract</button>
+            <button type="submit" class="btn submit-btn" id="submitBtn" disabled>
+                Extract Transactions
+            </button>
         </form>
-        <div class="footer">
-            Supports PDF, JPG, PNG, JFIF &nbsp;·&nbsp;
-            <a href="/statement" style="color:#555;text-decoration:none;">Credit Card Statements →</a>
-        </div>
+
+        <div class="footer">Works best with digital PDFs (TD, RBC, CIBC, BMO, Scotiabank, etc.)</div>
     </div>
 
     <script>
+        const MAX_FILES = {{ max_files }};
+        const MAX_MB = {{ max_mb }};
         const uploadArea = document.getElementById('uploadArea');
         const fileInput = document.getElementById('fileInput');
         const fileList = document.getElementById('fileList');
         const submitBtn = document.getElementById('submitBtn');
         let selectedFiles = [];
 
-        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(e => {
-            uploadArea.addEventListener(e, ev => { ev.preventDefault(); ev.stopPropagation(); });
-        });
-        ['dragenter', 'dragover'].forEach(e => uploadArea.addEventListener(e, () => uploadArea.classList.add('dragover')));
-        ['dragleave', 'drop'].forEach(e => uploadArea.addEventListener(e, () => uploadArea.classList.remove('dragover')));
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(e =>
+            uploadArea.addEventListener(e, ev => { ev.preventDefault(); ev.stopPropagation(); })
+        );
+        ['dragenter', 'dragover'].forEach(e =>
+            uploadArea.addEventListener(e, () => uploadArea.classList.add('dragover'))
+        );
+        ['dragleave', 'drop'].forEach(e =>
+            uploadArea.addEventListener(e, () => uploadArea.classList.remove('dragover'))
+        );
 
-        uploadArea.addEventListener('drop', e => handleFiles(e.dataTransfer.files));
-        fileInput.addEventListener('change', e => handleFiles(e.target.files));
+        uploadArea.addEventListener('drop', e => addFiles(e.dataTransfer.files));
+        fileInput.addEventListener('change', e => addFiles(e.target.files));
 
-        function handleFiles(files) {
+        function addFiles(files) {
             selectedFiles = [...selectedFiles, ...Array.from(files)];
             updateUI();
         }
 
+        function formatSize(bytes) {
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+        }
+
         function updateUI() {
+            const totalBytes = selectedFiles.reduce((s, f) => s + f.size, 0);
+            const totalMb = totalBytes / (1024 * 1024);
+            const tooMany = selectedFiles.length > MAX_FILES;
+            const tooBig = totalMb > MAX_MB;
+
             fileList.innerHTML = selectedFiles.map((f, i) => `
                 <div class="file-item">
-                    <span>${f.name}</span>
+                    <span>${f.name}<span class="size">${formatSize(f.size)}</span></span>
                     <span class="remove" onclick="removeFile(${i})">Remove</span>
                 </div>
             `).join('');
-            submitBtn.disabled = selectedFiles.length === 0;
+
+            let warning = '';
+            if (tooMany) warning = `<div class="flash error">Too many files — max ${MAX_FILES}</div>`;
+            else if (tooBig) warning = `<div class="flash error">Total size ${totalMb.toFixed(1)} MB exceeds ${MAX_MB} MB limit — please remove some files</div>`;
+
+            document.getElementById('sizeWarning').innerHTML = warning;
+            submitBtn.disabled = selectedFiles.length === 0 || tooMany || tooBig;
+
             const dt = new DataTransfer();
             selectedFiles.forEach(f => dt.items.add(f));
             fileInput.files = dt.files;
@@ -141,5 +171,6 @@
             updateUI();
         }
     </script>
+    <div id="sizeWarning" style="margin-top:12px;"></div>
 </body>
 </html>
