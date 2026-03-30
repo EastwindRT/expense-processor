@@ -695,15 +695,32 @@ def extract_transactions_from_statement(text: str, source_filename: str) -> list
     years_found = re.findall(r'\b(20\d{2})\b', text)
     statement_year = years_found[0] if years_found else str(datetime.now().year)
 
-    # Conservative skip list — only phrases that are unambiguously NOT transactions.
-    # Do NOT include broad words like 'credit', 'debit', 'amount', 'description'
-    # which appear in many legitimate merchant names.
-    SKIP_PHRASES = [
-        'credit limit', 'available credit', 'minimum payment', 'payment due date',
-        'statement period', 'account number', 'previous balance', 'new balance',
-        'opening balance', 'closing balance', 'total transactions', 'total fees charged',
-        'total interest charged', 'page ', '-----', '=====',
-    ]
+    # Regex that matches ANY line which is a balance/summary entry — not a transaction.
+    # Uses word-boundary matching so "PREVIOUS STATEMENT BALANCE" is caught even
+    # though it doesn't contain the exact substring "previous balance".
+    SKIP_LINE_RE = re.compile(
+        r'\b(?:'
+        # All balance variants (previous/prior/opening/closing/new/last + optional "statement")
+        r'(?:previous|prior|opening|closing|new|starting|ending|current|last)\s+'
+        r'(?:statement\s+)?balance'
+        # Balance forward / brought forward
+        r'|balance\s+(?:forward|carried|brought)'
+        r'|bal(?:ance)?\s+(?:fwd|forward)'
+        r'|brought\s+forward'
+        # Account summary lines
+        r'|credit\s+limit'
+        r'|available\s+(?:credit|balance)'
+        r'|minimum\s+(?:payment|amount\s+due)'
+        r'|payment\s+due\s+date'
+        r'|statement\s+(?:period|date|balance|summary)'
+        r'|account\s+(?:number|summary|activity\s+summary)'
+        r'|total\s+(?:new\s+)?(?:charges?|purchases?|credits?|payments?|fees?\s+charged)'
+        r'|interest\s+charged'
+        r'|annual\s+(?:fee|interest\s+rate)'
+        r'|days\s+in\s+(?:billing|statement)'
+        r')\b',
+        re.IGNORECASE
+    )
 
     MONTH_PAT = r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?'
 
@@ -715,10 +732,12 @@ def extract_transactions_from_statement(text: str, source_filename: str) -> list
         re.compile(r'^(\d{1,2}/\d{1,2})\s+', re.IGNORECASE),
     ]
 
-    # Amount anywhere in line (used for search, not anchored to end)
-    # Optionally followed by CR and an optional trailing balance column
+    # Amount at end of line — no leading-space requirement so a bare "12.34" line
+    # is also matched.  Negative lookbehind (?<!\d) prevents matching mid-number.
+    # Trailing balance column (second amount) is swallowed so we take the charge,
+    # not the running balance.
     amount_search_re = re.compile(
-        r'\s(-?\$?[\d,]+\.\d{1,2})\s*(CR|cr|Cr)?(?:\s+[\d,]+\.\d{1,2})?\s*$'
+        r'(?<!\d)(-?\$?[\d,]+\.\d{1,2})\s*(CR|cr|Cr)?(?:\s+[\d,]+\.\d{1,2})?\s*$'
     )
 
     def try_parse_date(line: str):
@@ -778,8 +797,7 @@ def extract_transactions_from_statement(text: str, source_filename: str) -> list
         if not line or len(line) < 5:
             continue
 
-        line_lower = line.lower()
-        if any(kw in line_lower for kw in SKIP_PHRASES):
+        if SKIP_LINE_RE.search(line):
             reset()
             continue
 
@@ -819,7 +837,7 @@ def extract_transactions_from_statement(text: str, source_filename: str) -> list
             else:
                 reset()  # Too many lines without amount — not a transaction
 
-    # Deduplicate by (date, amount) — keeps first occurrence
+    # Deduplicate by (date, amount, desc prefix) — keeps first occurrence
     seen: set = set()
     unique: list = []
     for t in transactions:
@@ -827,6 +845,9 @@ def extract_transactions_from_statement(text: str, source_filename: str) -> list
         if key not in seen:
             seen.add(key)
             unique.append(t)
+
+    # Belt-and-suspenders: drop anything that slipped through with a balance description
+    unique = [t for t in unique if not SKIP_LINE_RE.search(t['description'])]
 
     return unique
 
