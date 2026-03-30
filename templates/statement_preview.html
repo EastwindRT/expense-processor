@@ -187,6 +187,28 @@
         </div>
     </div>
 
+    {% if file_stats %}
+    <details style="margin-bottom:24px;">
+        <summary style="cursor:pointer;font-size:0.85rem;color:#666;padding:8px 0;">Per-file breakdown</summary>
+        <table style="margin-top:10px;width:100%;border-collapse:collapse;font-size:0.85rem;background:#fff;border:1px solid #eee;border-radius:6px;overflow:hidden;">
+            <thead><tr style="background:#f5f5f5;">
+                <th style="text-align:left;padding:8px 12px;font-weight:500;color:#555;">File</th>
+                <th style="text-align:center;padding:8px 12px;font-weight:500;color:#555;">Pages</th>
+                <th style="text-align:center;padding:8px 12px;font-weight:500;color:#555;">Transactions found</th>
+            </tr></thead>
+            <tbody>
+            {% for s in file_stats %}
+            <tr style="border-top:1px solid #f0f0f0;">
+                <td style="padding:7px 12px;">{{ s.file }}</td>
+                <td style="padding:7px 12px;text-align:center;color:#888;">{{ s.pages }}</td>
+                <td style="padding:7px 12px;text-align:center;{% if s.count == 0 %}color:#c62828;font-weight:600;{% else %}color:#2e7d32;{% endif %}">{{ s.count }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </details>
+    {% endif %}
+
     {% if transactions %}
     <div class="toolbar">
         <input type="text" id="searchBox" placeholder="Filter by description or source…" oninput="filterRows(this.value)">

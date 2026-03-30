@@ -639,27 +639,29 @@ def normalize_transaction_date(date_str: str, statement_year: str = None) -> Opt
     return None
 
 
-def extract_text_for_statement(file_path: Path) -> str:
+def extract_text_for_statement(file_path: Path) -> tuple[str, int]:
     """
     Extract text from a statement PDF using word-position grouping.
-    This reconstructs tabular rows correctly for multi-column PDFs
-    (e.g. date | description | amount in separate columns).
-    Falls back to standard extraction for images.
+    Reconstructs tabular rows for multi-column PDFs (date | description | amount).
+    Returns (text, page_count).
     """
     if file_path.suffix.lower() != '.pdf':
-        return extract_text_from_image(file_path)
+        return extract_text_from_image(file_path), 1
 
     if HAS_FITZ:
         try:
             doc = fitz.open(file_path)
+            page_count = doc.page_count
             pages_text = []
             for page in doc:
                 words = page.get_text("words")  # (x0,y0,x1,y1,word,block,line,wnum)
                 if words:
-                    # Group words into rows by Y coordinate (3-point tolerance)
+                    # Group words into rows by Y coordinate.
+                    # Use 5-point tolerance — loose enough to handle slight vertical
+                    # variations within a row, tight enough not to merge adjacent rows.
                     rows: dict = {}
                     for x0, y0, x1, y1, word, *_ in words:
-                        row_key = round(y0 / 3) * 3
+                        row_key = round(y0 / 5) * 5
                         rows.setdefault(row_key, []).append((x0, word))
                     lines = []
                     for y_key in sorted(rows):
@@ -671,38 +673,40 @@ def extract_text_for_statement(file_path: Path) -> str:
             doc.close()
             result = '\n'.join(pages_text)
             if result.strip():
-                return result
+                return result, page_count
         except Exception as e:
             print(f"Statement word extraction error for {file_path.name}: {e}")
 
-    return extract_text_from_pdf(file_path)
+    return extract_text_from_pdf(file_path), 1
 
 
 def extract_transactions_from_statement(text: str, source_filename: str) -> list[dict]:
     """
-    Extract individual line-item transactions from a credit card statement.
-    Handles TD, RBC, CIBC, BMO, Scotiabank and similar formats.
-    Returns list of {date, description, amount, source_file}.
-    """
-    transactions = []
+    State-machine transaction extractor for credit card statements.
 
-    # Detect the statement year from the first 4-digit year found in the document
+    Handles:
+    - Single-line:  Jan 15  TIM HORTONS #456  4.56
+    - Two-date:     Jan 15  Jan 17  TIM HORTONS  4.56  (posting date skipped)
+    - Multi-line:   Jan 15  WALMART CANADA
+                            TORONTO ON  87.23
+    - Balance col:  Jan 15  AMAZON.CA  29.99  1,234.56  (balance swallowed)
+    - CR credits:   Jan 20  REFUND  50.00 CR  → -$50.00
+    """
     years_found = re.findall(r'\b(20\d{2})\b', text)
     statement_year = years_found[0] if years_found else str(datetime.now().year)
 
-    # Only skip lines that are unambiguously non-transaction (exact phrase matches).
-    # Intentionally NOT including broad words like 'credit', 'debit', 'amount', 'description'
+    # Conservative skip list — only phrases that are unambiguously NOT transactions.
+    # Do NOT include broad words like 'credit', 'debit', 'amount', 'description'
     # which appear in many legitimate merchant names.
-    SKIP_PHRASES = {
+    SKIP_PHRASES = [
         'credit limit', 'available credit', 'minimum payment', 'payment due date',
         'statement period', 'account number', 'previous balance', 'new balance',
-        'opening balance', 'closing balance', 'page ', '---', '===',
-    }
+        'opening balance', 'closing balance', 'total transactions', 'total fees charged',
+        'total interest charged', 'page ', '-----', '=====',
+    ]
 
     MONTH_PAT = r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?'
 
-    # Date patterns at start of a transaction line — ordered most-specific first.
-    # Also handles day-first formats used by some Canadian banks (e.g. "15 Jan").
     date_start_pats = [
         re.compile(r'^(\d{4}-\d{2}-\d{2})\s+', re.IGNORECASE),
         re.compile(r'^(\d{1,2}/\d{1,2}/\d{2,4})\s+', re.IGNORECASE),
@@ -711,76 +715,120 @@ def extract_transactions_from_statement(text: str, source_filename: str) -> list
         re.compile(r'^(\d{1,2}/\d{1,2})\s+', re.IGNORECASE),
     ]
 
-    # Amount pattern: optional negative, optional $, digits with optional commas,
-    # 1-2 decimal places, optional CR suffix, optional trailing balance column.
-    # The (?:\s+[\d,]+\.\d{1,2})? at the end swallows a trailing balance column
-    # so we don't accidentally pick up the running balance as the transaction amount.
-    amount_re = re.compile(
-        r'^(.+?)\s+(-?\$?[\d,]+\.\d{1,2})\s*(CR|cr|Cr)?(?:\s+[\d,]+\.\d{1,2})?\s*$'
+    # Amount anywhere in line (used for search, not anchored to end)
+    # Optionally followed by CR and an optional trailing balance column
+    amount_search_re = re.compile(
+        r'\s(-?\$?[\d,]+\.\d{1,2})\s*(CR|cr|Cr)?(?:\s+[\d,]+\.\d{1,2})?\s*$'
     )
+
+    def try_parse_date(line: str):
+        """Return (date_str, chars_consumed) or (None, 0)."""
+        for pat in date_start_pats:
+            m = pat.match(line)
+            if m:
+                d = normalize_transaction_date(m.group(1), statement_year)
+                if d:
+                    end = m.end()
+                    # Skip a second (posting) date immediately after
+                    remaining = line[end:]
+                    for pat2 in date_start_pats:
+                        m2 = pat2.match(remaining)
+                        if m2 and normalize_transaction_date(m2.group(1), statement_year):
+                            end += m2.end()
+                            break
+                    return d, end
+        return None, 0
+
+    transactions = []
+    # Pending state
+    p_date = None
+    p_desc_parts: list = []
+    p_cont = 0
+    MAX_CONT = 4  # max continuation lines before giving up
+
+    def commit(raw_amount: str, is_cr: bool):
+        nonlocal p_date, p_desc_parts, p_cont
+        if p_date and p_desc_parts:
+            desc = re.sub(r'\s{2,}', ' ', ' '.join(p_desc_parts)).strip()
+            if desc and len(desc) >= 2:
+                try:
+                    val = float(raw_amount.replace('$', '').replace(',', ''))
+                    if 0.01 <= abs(val) <= 50000:
+                        fmt = f"-${abs(val):.2f}" if (is_cr or val < 0) else f"${val:.2f}"
+                        transactions.append({
+                            'date': p_date,
+                            'description': desc[:100],
+                            'amount': fmt,
+                            'source_file': source_filename,
+                        })
+                except ValueError:
+                    pass
+        p_date = None
+        p_desc_parts = []
+        p_cont = 0
+
+    def reset():
+        nonlocal p_date, p_desc_parts, p_cont
+        p_date = None
+        p_desc_parts = []
+        p_cont = 0
 
     for raw_line in text.split('\n'):
         line = raw_line.strip()
-        if not line or len(line) < 8:
+        if not line or len(line) < 5:
             continue
 
         line_lower = line.lower()
         if any(kw in line_lower for kw in SKIP_PHRASES):
+            reset()
             continue
 
-        amount_m = amount_re.match(line)
-        if not amount_m:
-            continue
+        amount_m = amount_search_re.search(line)
+        has_amount = bool(amount_m)
+        date, date_end = try_parse_date(line)
 
-        prefix = amount_m.group(1).strip()
-        raw_amount = amount_m.group(2)
-        is_credit = bool(amount_m.group(3))
+        if date and has_amount:
+            # ── Complete single-line transaction ──────────────────────────
+            reset()
+            desc_text = re.sub(r'\s{2,}', ' ', line[date_end:amount_m.start()]).strip()
+            p_date = date
+            p_desc_parts = [desc_text] if desc_text else []
+            commit(amount_m.group(1), bool(amount_m.group(2)))
 
-        try:
-            amount_val = float(raw_amount.replace('$', '').replace(',', ''))
-            if not (0.01 <= abs(amount_val) <= 50000):
-                continue
-        except ValueError:
-            continue
+        elif date and not has_amount:
+            # ── Date found, description continues on next line(s) ─────────
+            reset()
+            p_date = date
+            rest = line[date_end:].strip()
+            if rest:
+                p_desc_parts = [rest]
+            p_cont = 0
 
-        # Extract date from the start of the prefix
-        date = None
-        desc_start = 0
-        for pat in date_start_pats:
-            m = pat.match(prefix)
-            if m:
-                date = normalize_transaction_date(m.group(1), statement_year)
-                if date:
-                    desc_start = m.end()
-                    # Skip a second (posting) date if present right after
-                    remaining = prefix[desc_start:]
-                    for pat2 in date_start_pats:
-                        m2 = pat2.match(remaining)
-                        if m2 and normalize_transaction_date(m2.group(1), statement_year):
-                            desc_start += m2.end()
-                            break
-                    break
+        elif not date and has_amount and p_date:
+            # ── Continuation line that closes the transaction ─────────────
+            desc_part = re.sub(r'\s{2,}', ' ', line[:amount_m.start()]).strip()
+            if desc_part:
+                p_desc_parts.append(desc_part)
+            commit(amount_m.group(1), bool(amount_m.group(2)))
 
-        if not date:
-            continue
+        elif not date and not has_amount and p_date:
+            # ── Pure description continuation ─────────────────────────────
+            p_cont += 1
+            if p_cont <= MAX_CONT:
+                p_desc_parts.append(line)
+            else:
+                reset()  # Too many lines without amount — not a transaction
 
-        description = re.sub(r'\s{2,}', ' ', prefix[desc_start:]).strip()
-        if not description or len(description) < 2:
-            continue
+    # Deduplicate by (date, amount) — keeps first occurrence
+    seen: set = set()
+    unique: list = []
+    for t in transactions:
+        key = (t['date'], t['amount'], t['description'][:20])
+        if key not in seen:
+            seen.add(key)
+            unique.append(t)
 
-        if is_credit or amount_val < 0:
-            formatted_amount = f"-${abs(amount_val):.2f}"
-        else:
-            formatted_amount = f"${amount_val:.2f}"
-
-        transactions.append({
-            'date': date,
-            'description': description[:80],
-            'amount': formatted_amount,
-            'source_file': source_filename,
-        })
-
-    return transactions
+    return unique
 
 
 def get_session_folder() -> Path:
@@ -1178,11 +1226,12 @@ def statement_preview():
         return redirect(url_for('statement_index'))
 
     all_transactions = []
+    file_stats = []   # per-file summary shown in UI
     errors = []
 
     for file_path in files:
         try:
-            text = extract_text_for_statement(file_path)
+            text, page_count = extract_text_for_statement(file_path)
             if not text.strip():
                 errors.append({
                     'file': file_path.name,
@@ -1192,6 +1241,11 @@ def statement_preview():
                 continue
             txns = extract_transactions_from_statement(text, file_path.name)
             all_transactions.extend(txns)
+            file_stats.append({
+                'file': file_path.name,
+                'pages': page_count,
+                'count': len(txns),
+            })
             if not txns:
                 errors.append({
                     'file': file_path.name,
@@ -1205,6 +1259,7 @@ def statement_preview():
         'statement_preview.html',
         transactions=all_transactions,
         errors=errors,
+        file_stats=file_stats,
         file_count=len(files),
     )
 
