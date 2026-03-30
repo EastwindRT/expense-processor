@@ -158,7 +158,15 @@
         <h3>⚠ Some files had issues</h3>
         <ul>
             {% for e in errors %}
-            <li><strong>{{ e.file }}</strong> — {{ e.error }}</li>
+            <li>
+                <strong>{{ e.file }}</strong> — {{ e.error }}
+                {% if e.raw_text %}
+                <details style="margin-top:8px;">
+                    <summary style="cursor:pointer;color:#888;font-size:0.8rem;">Show extracted text (first 2000 chars)</summary>
+                    <pre style="margin-top:8px;padding:12px;background:#f9f9f9;border:1px solid #eee;border-radius:4px;font-size:0.75rem;white-space:pre-wrap;word-break:break-all;max-height:300px;overflow-y:auto;">{{ e.raw_text }}</pre>
+                </details>
+                {% endif %}
+            </li>
             {% endfor %}
         </ul>
     </div>

@@ -639,6 +639,45 @@ def normalize_transaction_date(date_str: str, statement_year: str = None) -> Opt
     return None
 
 
+def extract_text_for_statement(file_path: Path) -> str:
+    """
+    Extract text from a statement PDF using word-position grouping.
+    This reconstructs tabular rows correctly for multi-column PDFs
+    (e.g. date | description | amount in separate columns).
+    Falls back to standard extraction for images.
+    """
+    if file_path.suffix.lower() != '.pdf':
+        return extract_text_from_image(file_path)
+
+    if HAS_FITZ:
+        try:
+            doc = fitz.open(file_path)
+            pages_text = []
+            for page in doc:
+                words = page.get_text("words")  # (x0,y0,x1,y1,word,block,line,wnum)
+                if words:
+                    # Group words into rows by Y coordinate (3-point tolerance)
+                    rows: dict = {}
+                    for x0, y0, x1, y1, word, *_ in words:
+                        row_key = round(y0 / 3) * 3
+                        rows.setdefault(row_key, []).append((x0, word))
+                    lines = []
+                    for y_key in sorted(rows):
+                        row_words = sorted(rows[y_key], key=lambda w: w[0])
+                        lines.append('  '.join(w[1] for w in row_words))
+                    pages_text.append('\n'.join(lines))
+                else:
+                    pages_text.append(page.get_text())
+            doc.close()
+            result = '\n'.join(pages_text)
+            if result.strip():
+                return result
+        except Exception as e:
+            print(f"Statement word extraction error for {file_path.name}: {e}")
+
+    return extract_text_from_pdf(file_path)
+
+
 def extract_transactions_from_statement(text: str, source_filename: str) -> list[dict]:
     """
     Extract individual line-item transactions from a credit card statement.
@@ -647,32 +686,37 @@ def extract_transactions_from_statement(text: str, source_filename: str) -> list
     """
     transactions = []
 
-    # Detect the statement year from the most prominent year in the document
+    # Detect the statement year from the first 4-digit year found in the document
     years_found = re.findall(r'\b(20\d{2})\b', text)
     statement_year = years_found[0] if years_found else str(datetime.now().year)
 
-    SKIP_KEYWORDS = {
-        'opening balance', 'closing balance', 'credit limit', 'available credit',
-        'minimum payment', 'payment due', 'statement date', 'account number',
-        'previous balance', 'new balance', 'past due', 'total fees',
-        'total interest', 'annual fee', 'monthly fee', 'page ', 'continued',
-        'date of transaction', 'date of posting', 'transaction date', 'posting date',
-        'description', 'amount', 'debit', 'credit', '---', '===',
+    # Only skip lines that are unambiguously non-transaction (exact phrase matches).
+    # Intentionally NOT including broad words like 'credit', 'debit', 'amount', 'description'
+    # which appear in many legitimate merchant names.
+    SKIP_PHRASES = {
+        'credit limit', 'available credit', 'minimum payment', 'payment due date',
+        'statement period', 'account number', 'previous balance', 'new balance',
+        'opening balance', 'closing balance', 'page ', '---', '===',
     }
 
     MONTH_PAT = r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?'
 
-    # Ordered list of date patterns that can appear at the start of a transaction line
+    # Date patterns at start of a transaction line — ordered most-specific first.
+    # Also handles day-first formats used by some Canadian banks (e.g. "15 Jan").
     date_start_pats = [
         re.compile(r'^(\d{4}-\d{2}-\d{2})\s+', re.IGNORECASE),
         re.compile(r'^(\d{1,2}/\d{1,2}/\d{2,4})\s+', re.IGNORECASE),
         re.compile(r'^(' + MONTH_PAT + r'\s+\d{1,2}(?:[,/.]\s*\d{2,4})?)\s+', re.IGNORECASE),
+        re.compile(r'^(\d{1,2}\s+' + MONTH_PAT + r'(?:\s+\d{2,4})?)\s+', re.IGNORECASE),
         re.compile(r'^(\d{1,2}/\d{1,2})\s+', re.IGNORECASE),
     ]
 
-    # Amount at the end of a line, optionally followed by "CR" for credits/refunds
-    amount_end_re = re.compile(
-        r'^(.+?)\s+(-?\$?[\d,]+\.\d{2})\s*(CR|cr|Cr)?\s*$'
+    # Amount pattern: optional negative, optional $, digits with optional commas,
+    # 1-2 decimal places, optional CR suffix, optional trailing balance column.
+    # The (?:\s+[\d,]+\.\d{1,2})? at the end swallows a trailing balance column
+    # so we don't accidentally pick up the running balance as the transaction amount.
+    amount_re = re.compile(
+        r'^(.+?)\s+(-?\$?[\d,]+\.\d{1,2})\s*(CR|cr|Cr)?(?:\s+[\d,]+\.\d{1,2})?\s*$'
     )
 
     for raw_line in text.split('\n'):
@@ -680,13 +724,11 @@ def extract_transactions_from_statement(text: str, source_filename: str) -> list
         if not line or len(line) < 8:
             continue
 
-        # Skip header/summary lines
         line_lower = line.lower()
-        if any(kw in line_lower for kw in SKIP_KEYWORDS):
+        if any(kw in line_lower for kw in SKIP_PHRASES):
             continue
 
-        # Line must end with a dollar amount (optionally followed by CR)
-        amount_m = amount_end_re.match(line)
+        amount_m = amount_re.match(line)
         if not amount_m:
             continue
 
@@ -694,7 +736,6 @@ def extract_transactions_from_statement(text: str, source_filename: str) -> list
         raw_amount = amount_m.group(2)
         is_credit = bool(amount_m.group(3))
 
-        # Validate amount is a plausible transaction size
         try:
             amount_val = float(raw_amount.replace('$', '').replace(',', ''))
             if not (0.01 <= abs(amount_val) <= 50000):
@@ -702,7 +743,7 @@ def extract_transactions_from_statement(text: str, source_filename: str) -> list
         except ValueError:
             continue
 
-        # Extract date from start of prefix
+        # Extract date from the start of the prefix
         date = None
         desc_start = 0
         for pat in date_start_pats:
@@ -711,7 +752,7 @@ def extract_transactions_from_statement(text: str, source_filename: str) -> list
                 date = normalize_transaction_date(m.group(1), statement_year)
                 if date:
                     desc_start = m.end()
-                    # Some statements have TWO dates (transaction + posting date) — skip the second
+                    # Skip a second (posting) date if present right after
                     remaining = prefix[desc_start:]
                     for pat2 in date_start_pats:
                         m2 = pat2.match(remaining)
@@ -727,7 +768,6 @@ def extract_transactions_from_statement(text: str, source_filename: str) -> list
         if not description or len(description) < 2:
             continue
 
-        # Format amount — credits (refunds) stored as negative
         if is_credit or amount_val < 0:
             formatted_amount = f"-${abs(amount_val):.2f}"
         else:
@@ -1142,16 +1182,24 @@ def statement_preview():
 
     for file_path in files:
         try:
-            text = extract_text(file_path)
+            text = extract_text_for_statement(file_path)
             if not text.strip():
-                errors.append({'file': file_path.name, 'error': 'Could not extract text from this file'})
+                errors.append({
+                    'file': file_path.name,
+                    'error': 'Could not extract text from this file',
+                    'raw_text': ''
+                })
                 continue
             txns = extract_transactions_from_statement(text, file_path.name)
             all_transactions.extend(txns)
             if not txns:
-                errors.append({'file': file_path.name, 'error': 'No transactions detected'})
+                errors.append({
+                    'file': file_path.name,
+                    'error': 'No transactions detected — see raw text below to diagnose',
+                    'raw_text': text[:2000]
+                })
         except Exception as e:
-            errors.append({'file': file_path.name, 'error': str(e)})
+            errors.append({'file': file_path.name, 'error': str(e), 'raw_text': ''})
 
     return render_template(
         'statement_preview.html',
