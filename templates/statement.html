@@ -15,10 +15,23 @@
         }
         .container { max-width: 600px; margin: 0 auto; }
         h1 { font-size: 1.5rem; font-weight: 500; margin-bottom: 8px; }
-        .subtitle { color: #666; font-size: 0.95rem; margin-bottom: 40px; }
-        .back { font-size: 0.85rem; color: #999; margin-bottom: 32px; display: block; }
-        .back a { color: #555; text-decoration: none; }
-        .back a:hover { color: #111; }
+        .subtitle { color: #666; font-size: 0.95rem; margin-bottom: 32px; }
+        .tabs {
+            display: flex;
+            border-bottom: 2px solid #eee;
+            margin-bottom: 36px;
+        }
+        .tab {
+            padding: 10px 20px;
+            font-size: 0.9rem;
+            color: #999;
+            text-decoration: none;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+            transition: color 0.15s;
+        }
+        .tab:hover { color: #111; }
+        .tab.active { color: #111; border-bottom-color: #111; font-weight: 500; }
         .flash {
             padding: 12px 16px;
             margin-bottom: 24px;
@@ -79,9 +92,11 @@
 </head>
 <body>
     <div class="container">
-        <p class="back"><a href="/">← Receipt Processor</a></p>
-        <h1>Credit Card Statement Processor</h1>
-        <p class="subtitle">Upload monthly statements to extract all line-item transactions into one CSV</p>
+        <h1>Expense Processor</h1>
+        <div class="tabs">
+            <a href="/" class="tab">Receipts</a>
+            <a href="/statement" class="tab active">Credit Card Statements</a>
+        </div>
 
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}

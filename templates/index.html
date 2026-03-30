@@ -15,7 +15,23 @@
         }
         .container { max-width: 600px; margin: 0 auto; }
         h1 { font-size: 1.5rem; font-weight: 500; margin-bottom: 8px; }
-        .subtitle { color: #666; font-size: 0.95rem; margin-bottom: 40px; }
+        .subtitle { color: #666; font-size: 0.95rem; margin-bottom: 32px; }
+        .tabs {
+            display: flex;
+            border-bottom: 2px solid #eee;
+            margin-bottom: 36px;
+        }
+        .tab {
+            padding: 10px 20px;
+            font-size: 0.9rem;
+            color: #999;
+            text-decoration: none;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+            transition: color 0.15s;
+        }
+        .tab:hover { color: #111; }
+        .tab.active { color: #111; border-bottom-color: #111; font-weight: 500; }
         .flash {
             padding: 12px 16px;
             margin-bottom: 24px;
@@ -75,7 +91,10 @@
 <body>
     <div class="container">
         <h1>Expense Processor</h1>
-        <p class="subtitle">Upload receipts to extract and organize expense data</p>
+        <div class="tabs">
+            <a href="/" class="tab active">Receipts</a>
+            <a href="/statement" class="tab">Credit Card Statements</a>
+        </div>
 
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
@@ -96,10 +115,7 @@
             <div class="file-list" id="fileList"></div>
             <button type="submit" class="btn submit-btn" id="submitBtn" disabled>Upload & Extract</button>
         </form>
-        <div class="footer">
-            Supports PDF, JPG, PNG, JFIF &nbsp;·&nbsp;
-            <a href="/statement" style="color:#555;text-decoration:none;">Credit Card Statements →</a>
-        </div>
+        <div class="footer">Supports PDF, JPG, PNG, JFIF</div>
     </div>
 
     <script>
