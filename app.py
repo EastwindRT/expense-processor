@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import uuid
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -27,6 +28,8 @@ from flask import (
     session
 )
 from werkzeug.utils import secure_filename
+
+import receipt_processor as agent_processor
 
 # External dependencies
 try:
@@ -886,6 +889,219 @@ def health():
     if HAS_OCR:
         info['ocr_engine'] = 'ocr.space'
     return jsonify(info)
+
+
+def _agent_folder_from_request():
+    """Validate the JSON folder path or session id used by agent API routes."""
+    payload = request.get_json(silent=True) or {}
+    folder_value = payload.get('folder_path') or payload.get('folder')
+    session_id = payload.get('session_id')
+
+    if session_id:
+        session_folder = _agent_session_folder(str(session_id), create=False)
+        if not session_folder.exists():
+            return None, payload, (f"Agent session not found: {session_id}", 404)
+        return session_folder, payload, None
+
+    if not folder_value:
+        return None, payload, ('Missing required JSON field: folder_path or session_id', 400)
+
+    folder_path = agent_processor.validate_folder(str(folder_value))
+    if not folder_path:
+        return None, payload, (f"Folder does not exist or is not a directory: {folder_value}", 400)
+
+    return folder_path, payload, None
+
+
+def _agent_session_folder(session_id: str, create: bool = True) -> Path:
+    """Return an explicit API session folder for remote agent uploads."""
+    if not re.fullmatch(r'[a-f0-9-]{36}', session_id):
+        raise ValueError('session_id must be a UUID string')
+
+    folder = UPLOAD_FOLDER / 'agent-api' / session_id
+    if create:
+        folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+@app.route('/api/expenses/manifest', methods=['GET'])
+def api_expenses_manifest():
+    """Describe the agent-facing expense API."""
+    return jsonify({
+        'name': 'expense-receipt-agent',
+        'version': '1.0',
+        'description': 'Preview and process receipt folders into expenses.csv.',
+        'endpoints': {
+            'preview': {
+                'method': 'POST',
+                'path': '/api/expenses/preview',
+                'body': {
+                    'folder_path': 'C:\\\\path\\\\to\\\\receipts',
+                    'session_id': 'uuid-from-upload-for-render',
+                },
+                'mutates_files': False,
+            },
+            'upload': {
+                'method': 'POST',
+                'path': '/api/expenses/upload',
+                'content_type': 'multipart/form-data',
+                'fields': {
+                    'files': 'one or more receipt files',
+                    'session_id': 'optional existing session UUID',
+                },
+                'mutates_files': 'Stores uploaded files in a Render session folder.',
+            },
+            'process': {
+                'method': 'POST',
+                'path': '/api/expenses/process',
+                'body': {
+                    'session_id': 'uuid-from-upload-for-render',
+                    'apply': True,
+                    'approved': True,
+                    'skip_rename': False,
+                },
+                'mutates_files': 'Only when apply and approved are both true.',
+            },
+        },
+        'csv_columns': agent_processor.CSV_COLUMNS,
+        'supported_extensions': sorted(agent_processor.SUPPORTED_EXTENSIONS),
+    })
+
+
+@app.route('/api/expenses/upload', methods=['POST'])
+def api_expenses_upload():
+    """Upload receipt files into an explicit session for remote agents."""
+    uploaded_files = request.files.getlist('files')
+    if not uploaded_files:
+        return jsonify({'ok': False, 'error': 'No files uploaded in multipart field: files'}), 400
+
+    session_id = request.form.get('session_id') or str(uuid.uuid4())
+    try:
+        session_folder = _agent_session_folder(session_id)
+    except ValueError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 400
+
+    uploaded = []
+    rejected = []
+    existing_names = {path.name for path in session_folder.iterdir() if path.is_file()}
+
+    for uploaded_file in uploaded_files:
+        if not uploaded_file or not uploaded_file.filename:
+            continue
+
+        if not allowed_file(uploaded_file.filename):
+            rejected.append({
+                'filename': uploaded_file.filename,
+                'reason': 'unsupported file type',
+            })
+            continue
+
+        filename = secure_filename(uploaded_file.filename)
+        target_name = filename
+        stem = Path(filename).stem
+        suffix = Path(filename).suffix
+        counter = 1
+        while target_name in existing_names:
+            target_name = f"{stem}_{counter}{suffix}"
+            counter += 1
+
+        uploaded_file.save(session_folder / target_name)
+        existing_names.add(target_name)
+        uploaded.append(target_name)
+
+    return jsonify({
+        'ok': True,
+        'session_id': session_id,
+        'uploaded_count': len(uploaded),
+        'uploaded_files': uploaded,
+        'rejected': rejected,
+        'preview': {
+            'method': 'POST',
+            'path': '/api/expenses/preview',
+            'body': {'session_id': session_id},
+        },
+        'process': {
+            'method': 'POST',
+            'path': '/api/expenses/process',
+            'body': {'session_id': session_id, 'apply': True, 'approved': True},
+        },
+    })
+
+
+@app.route('/api/expenses/preview', methods=['POST'])
+def api_expenses_preview():
+    """Preview receipt extraction for a local folder without changing files."""
+    folder_path, _payload, error = _agent_folder_from_request()
+    if error:
+        message, status = error
+        return jsonify({'ok': False, 'error': message}), status
+
+    return jsonify(agent_processor.preview_folder(folder_path))
+
+
+@app.route('/api/expenses/process', methods=['POST'])
+def api_expenses_process():
+    """Process a local receipt folder after explicit agent approval."""
+    folder_path, payload, error = _agent_folder_from_request()
+    if error:
+        message, status = error
+        return jsonify({'ok': False, 'error': message}), status
+
+    apply_changes = bool(payload.get('apply')) and bool(payload.get('approved'))
+    response = agent_processor.process_folder_for_agent(
+        folder_path,
+        apply_changes=apply_changes,
+        skip_rename=bool(payload.get('skip_rename')),
+    )
+
+    if not apply_changes:
+        response['approval_required'] = {
+            'message': 'No files were changed. Send apply=true and approved=true to rename files and write expenses.csv.',
+            'required_fields': {'apply': True, 'approved': True},
+        }
+
+    return jsonify(response)
+
+
+@app.route('/api/expenses/session/<session_id>/download/csv')
+def api_expenses_download_csv(session_id):
+    """Download expenses.csv for an explicit agent session."""
+    try:
+        session_folder = _agent_session_folder(session_id, create=False)
+    except ValueError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 400
+
+    csv_path = session_folder / agent_processor.CSV_FILENAME
+    if not csv_path.exists():
+        return jsonify({'ok': False, 'error': 'expenses.csv not found for session'}), 404
+
+    return send_file(csv_path, as_attachment=True, download_name=agent_processor.CSV_FILENAME)
+
+
+@app.route('/api/expenses/session/<session_id>/download/all')
+def api_expenses_download_all(session_id):
+    """Download all files for an explicit agent session."""
+    try:
+        session_folder = _agent_session_folder(session_id, create=False)
+    except ValueError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 400
+
+    if not session_folder.exists():
+        return jsonify({'ok': False, 'error': 'Agent session not found'}), 404
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for file_path in session_folder.iterdir():
+            if file_path.is_file():
+                zf.write(file_path, file_path.name)
+
+    zip_buffer.seek(0)
+    return send_file(
+        zip_buffer,
+        mimetype='application/zip',
+        as_attachment=True,
+        download_name=f'expenses-{session_id}.zip',
+    )
 
 
 @app.route('/')

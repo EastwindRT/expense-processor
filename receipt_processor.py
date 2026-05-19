@@ -7,7 +7,9 @@ extracts date, merchant, and total, renames files, and creates a CSV.
 """
 
 import argparse
+import contextlib
 import csv
+import json
 import re
 import sys
 from datetime import datetime
@@ -468,6 +470,112 @@ def process_file(file_path: Path) -> dict:
     return result
 
 
+def serialize_result(result: dict) -> dict:
+    """Return a JSON-safe receipt result for agent/API callers."""
+    return {
+        'original_filename': result.get('original_filename'),
+        'date': result.get('date'),
+        'description': result.get('description'),
+        'total': result.get('total'),
+        'new_filename': result.get('new_filename'),
+        'date_estimated': bool(result.get('date_estimated')),
+        'error': result.get('error'),
+    }
+
+
+def preview_folder(folder: Path) -> dict:
+    """Extract receipt data and proposed filenames without changing files."""
+    files = find_receipt_files(folder)
+    results = [process_file(file_path) for file_path in files]
+    successful = [r for r in results if not r['error']]
+    failed = [r for r in results if r['error']]
+
+    return {
+        'ok': True,
+        'folder_path': str(folder),
+        'supported_extensions': sorted(SUPPORTED_EXTENSIONS),
+        'file_count': len(files),
+        'successful_count': len(successful),
+        'failed_count': len(failed),
+        'csv_path': str(folder / CSV_FILENAME),
+        'results': [serialize_result(r) for r in results],
+    }
+
+
+def process_folder_for_agent(
+    folder: Path,
+    *,
+    apply_changes: bool = False,
+    skip_rename: bool = False,
+) -> dict:
+    """
+    Agent-friendly folder processing.
+
+    Preview mode is the default and never changes files. Mutation requires
+    apply_changes=True, which writes the CSV and optionally renames files.
+    """
+    preview = preview_folder(folder)
+    results = []
+
+    for item in preview['results']:
+        full_result = dict(item)
+        full_result['file_path'] = folder / item['original_filename']
+        results.append(full_result)
+
+    successful = [r for r in results if not r['error']]
+    failed = [r for r in results if r['error']]
+    all_errors = [f"{r['original_filename']}: {r['error']}" for r in failed]
+
+    response = {
+        **preview,
+        'applied': False,
+        'dry_run': not apply_changes,
+        'skip_rename': skip_rename,
+        'renamed': [],
+        'errors_logged': False,
+    }
+
+    if not apply_changes:
+        return response
+
+    if not successful:
+        if all_errors:
+            write_error_log(folder, all_errors)
+            response['errors_logged'] = True
+        return response
+
+    csv_results = successful
+
+    if not skip_rename:
+        renamed_results = []
+        for r in successful:
+            old_path = r['file_path']
+            new_path = old_path.parent / r['new_filename']
+            try:
+                old_path.rename(new_path)
+                renamed_results.append(r)
+                response['renamed'].append({
+                    'original_filename': r['original_filename'],
+                    'new_filename': r['new_filename'],
+                })
+            except Exception as exc:
+                error_msg = f"Failed to rename {old_path.name}: {exc}"
+                r['error'] = error_msg
+                all_errors.append(error_msg)
+        csv_results = renamed_results
+
+    if csv_results:
+        write_to_csv(folder, csv_results, dry_run=False, quiet=True)
+
+    if all_errors:
+        write_error_log(folder, all_errors)
+        response['errors_logged'] = True
+
+    response['applied'] = bool(csv_results)
+    response['dry_run'] = False
+    return response
+
+
 def display_preview(results: list[dict]) -> None:
     """Display a preview of all extractions and proposed renames."""
     print("\n" + "=" * 80)
@@ -518,13 +626,14 @@ def get_user_confirmation() -> str:
         print("Please enter y, n, dry, or skip")
 
 
-def write_to_csv(folder: Path, results: list[dict], dry_run: bool = False) -> None:
+def write_to_csv(folder: Path, results: list[dict], dry_run: bool = False, quiet: bool = False) -> None:
     """Write or append results to the expenses CSV."""
     csv_path = folder / CSV_FILENAME
     file_exists = csv_path.exists()
 
     if dry_run:
-        print(f"\n[DRY RUN] Would write to: {csv_path}")
+        if not quiet:
+            print(f"\n[DRY RUN] Would write to: {csv_path}")
         return
 
     mode = 'a' if file_exists else 'w'
@@ -552,7 +661,8 @@ def write_to_csv(folder: Path, results: list[dict], dry_run: bool = False) -> No
             ]
             writer.writerow(row)
 
-    print(f"\nCSV updated: {csv_path}")
+    if not quiet:
+        print(f"\nCSV updated: {csv_path}")
 
 
 def rename_files(results: list[dict], dry_run: bool = False) -> list[str]:
@@ -616,12 +726,38 @@ Examples:
     parser.add_argument('--dry', '-d', action='store_true', help='Dry run - show what would happen without making changes')
     parser.add_argument('--yes', '-y', action='store_true', help='Auto-confirm processing (no prompts)')
     parser.add_argument('--skip', '-s', action='store_true', help='Skip file renaming, only create CSV')
+    parser.add_argument('--json', action='store_true', help='Machine-readable agent mode. Defaults to preview unless --yes is set.')
     return parser.parse_args()
 
 
 def main() -> None:
     """Main entry point for the receipt processor."""
     args = parse_args()
+
+    if args.json:
+        if not args.folder:
+            print(json.dumps({
+                'ok': False,
+                'error': 'folder is required in --json mode',
+            }, indent=2))
+            return
+
+        folder = validate_folder(args.folder)
+        if not folder:
+            print(json.dumps({
+                'ok': False,
+                'error': f"Folder '{args.folder}' does not exist or is not a directory.",
+            }, indent=2))
+            return
+
+        with contextlib.redirect_stdout(sys.stderr):
+            response = process_folder_for_agent(
+                folder,
+                apply_changes=args.yes and not args.dry,
+                skip_rename=args.skip,
+            )
+        print(json.dumps(response, indent=2))
+        return
 
     print("=" * 60)
     print("  EXPENSE RECEIPT PROCESSOR")
